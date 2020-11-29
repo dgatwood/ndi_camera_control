@@ -6,21 +6,40 @@
 #include <string>
 #include <thread>
 
+#include <sys/ioctl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
 #include <stdlib.h>
 #include <sys/param.h>
 #include <dlfcn.h>
 
 #include <Processing.NDI.Lib.h>
 
+#if 1
+// Linux framebuffer
+int framebufferFileHandle = -1;
+#endif
+
 #define SLOW_DEBUGGING 0
+
+#define ESUCCESS 0
+
+#define FBIOGET_VSCREENINFO 0x4600
+#define FBIOPUT_VSCREENINFO 0x4601
+#define FB_ACTIVATE_NOW     0   /* set values immediately (or vbl)*/
 
 static std::atomic<bool> exit_loop(false);
 static void sigint_handler(int)
 {    exit_loop = true;
 }
 
-void configureScreen(NDIlib_video_frame_v2_t video_recv);
+void configureScreen(NDIlib_video_frame_v2_t *video_recv);
 void showFrame(NDIlib_video_frame_v2_t *video_recv);
+static int xioctl(int fd, int request, void *arg);
 
 int main(int argc, char *argv[]) {
     std::string ndi_path;
@@ -30,13 +49,14 @@ int main(int argc, char *argv[]) {
     }
     char *stream_name = argv[1];
 
+#if 1
     /* BEGIN CRAP: Everything about the code below is gross, but it's boilerplate code. */
     const char* p_NDI_runtime_folder = ::getenv("NDI_RUNTIME_DIR_V4");
     if (p_NDI_runtime_folder) {
         ndi_path = p_NDI_runtime_folder;
         ndi_path += "/libndi.dylib";
     } else {
-        ndi_path = "libndi.4.dylib"; // The standard versioning scheme on Linux based systems using sym links
+        ndi_path = "/usr/local/NDISDK/lib/arm-rpi3-linux-gnueabihf/libndi.so.4"; // The standard versioning scheme on Linux based systems using sym links
     }
 
     // Try to load the library
@@ -52,6 +72,7 @@ int main(int argc, char *argv[]) {
         printf("Please re-install the NewTek NDI Runtimes to use this application.");
         return 0;
     }
+#endif
 
     // Lets get all of the DLL entry points
     const NDIlib_v3 *p_NDILib = NDIlib_v4_load();
@@ -75,8 +96,6 @@ int main(int argc, char *argv[]) {
     // Create a finder
     NDIlib_find_instance_t pNDI_find = p_NDILib->NDIlib_find_create_v2(&NDI_find_create_desc);
     if (!pNDI_find) return 0;
-
-    configureScreen();
 
     // We wait until there is at least one source on the network
     uint32_t no_sources = 0;
@@ -129,37 +148,68 @@ int main(int argc, char *argv[]) {
     // Destroy the NDI finder. We needed to have access to the pointers to p_sources[0]
     p_NDILib->NDIlib_find_destroy(pNDI_find);
 
+    fprintf(stderr, "Ready.\n");
+
     while (!exit_loop) {
         NDIlib_video_frame_v2_t video_recv;
 #ifdef ENABLE_AUDIO
         NDIlib_audio_frame_v3_t audio_recv;
 #endif
-        switch(NDIlib_recv_capture_v3(pNDI_recv, &video_recv,
+        NDIlib_frame_type_e frameType =
+        NDIlib_recv_capture_v3(pNDI_recv, &video_recv,
 #ifdef ENABLE_AUDIO
                &audio_recv,
 #else
                nullptr,
 #endif
-               nullptr, 1500)) {
+               nullptr, 1500);
+        switch(frameType) {
             case NDIlib_frame_type_video:
+#if SLOW_DEBUGGING
+                fprintf(stderr, "Video frame\n");
+#endif
                 showFrame(&video_recv);
                 break;
 #ifdef ENABLE_AUDIO
             case NDIlib_frame_type_audio:
 #endif
             default:
-                fprintf(stderr, "Unknown frame type.\n");
+#if SLOW_DEBUGGING
+                fprintf(stderr, "Unknown frame type %d.\n", frameType);
+#endif
+                true;
         }
     }
+
+    if (pNDI_recv != nullptr) {
+        // Destroy the receiver
+
+        printf("Closing the connection.\n");
+        p_NDILib->NDIlib_recv_connect(pNDI_recv, NULL);
+
+        printf("Destroying the NDI receiver.\n");
+        p_NDILib->NDIlib_recv_destroy(pNDI_recv);
+        printf("The NDI receiver has been destroyed.\n");
+    }
+
+    // Not required, but nice
+    p_NDILib->NDIlib_destroy();
 }
 
-void configureScreen(NDIlib_video_frame_v2_t video_recv) {
+void configureScreen(NDIlib_video_frame_v2_t *video_recv) {
     static bool configured = false;
     if (configured) return;
     configured = true;
 
 #if 1
     // Linux
+
+    struct fb_bitfield {
+        uint32_t offset;           /* beginning of bitfield    */
+        uint32_t length;           /* length of bitfield       */
+        uint32_t msb_right;        /* != 0 : Most significant bit is */ 
+                                   /* right */ 
+    };
 
     struct framebuffer_screen_info {
         uint32_t xres;                  /* visible resolution */
@@ -197,16 +247,31 @@ void configureScreen(NDIlib_video_frame_v2_t video_recv) {
         uint32_t sync;                  /* see FB_SYNC_x */
         uint32_t vmode;                 /* see FB_VMODE_x */
         uint32_t reserved[6];           /* Reserved for future compatibility */
+    };
+
+    framebufferFileHandle = open("/dev/fb0", O_RDONLY);
+    if (framebufferFileHandle == -1) {
+        perror("cameracontroller");
+        fprintf(stderr, "Could not open framebuffer.\n");
     }
 
-    int filehandle = xopen("/dev/fb0", O_RDONLY);
     struct framebuffer_screen_info screenInfo;
-    xioctl(fh, FBIOGET_VSCREENINFO, &screenInfo);
-    screenInfo.xres_virtual = video_recv.xres;
-    screenInfo.yres_virtual = video_recv.yres;
+    int error = xioctl(framebufferFileHandle, FBIOGET_VSCREENINFO, &screenInfo);
+    if (error != ESUCCESS) {
+        perror("cameracontroller");
+        fprintf(stderr, "framebuffer read ioctl failed with error %d\n", error);
+        exit(1);
+    }
+    screenInfo.xres_virtual = video_recv->xres;
+    screenInfo.yres_virtual = video_recv->yres;
 
-    screenInfo.activate = FB_ACTIVATE_ALL;
-    xioctl(fh, FBIOPUT_VSCREENINFO, &screenInfo);
+    screenInfo.activate = FB_ACTIVATE_NOW;
+    error = xioctl(framebufferFileHandle, FBIOPUT_VSCREENINFO, &screenInfo);
+    if (error != ESUCCESS) {
+        perror("cameracontroller");
+        fprintf(stderr, "framebuffer read ioctl failed with error %d\n", error);
+        exit(1);
+    }
 
 #else
   // Mac
@@ -215,8 +280,17 @@ void configureScreen(NDIlib_video_frame_v2_t video_recv) {
 
 }
 
-
 void showFrame(NDIlib_video_frame_v2_t *video_recv) {
+    configureScreen(video_recv);
 
+    lseek(framebufferFileHandle, 0, SEEK_SET);
+    write(framebufferFileHandle, video_recv->p_data, (video_recv->xres * video_recv->yres));
 }
 
+static int xioctl(int fd, int request, void *arg)
+{
+    int r;
+    do r = ioctl (fd, request, arg);
+    while (-1 == r && EINTR == errno);
+    return r;
+}
