@@ -20,25 +20,51 @@
 #include <Processing.NDI.Lib.h>
 
 #if 1
+#include <linux/kd.h>
+#include <linux/vt.h>
+#include <linux/fb.h>
+#include <linux/input.h>
+#include <sys/mman.h>
+#include <sys/user.h>
+
 // Linux framebuffer
 int framebufferFileHandle = -1;
+struct fb_var_screeninfo initialFramebufferConfiguration;
+struct fb_var_screeninfo framebufferActiveConfiguration;
+struct fb_fix_screeninfo framebufferFixedConfiguration;
+unsigned char *framebufferMemory = NULL;
+unsigned char *framebufferActiveMemory = NULL;
+
 #endif
 
 #define SLOW_DEBUGGING 0
 
+#if 0
 #define ESUCCESS 0
 
 #define FBIOGET_VSCREENINFO 0x4600
 #define FBIOPUT_VSCREENINFO 0x4601
 #define FB_ACTIVATE_NOW     0   /* set values immediately (or vbl)*/
+#endif
+
+#ifndef PAGE_SHIFT
+        #define PAGE_SHIFT 12
+#endif
+#ifndef PAGE_SIZE
+        #define PAGE_SIZE (1UL << PAGE_SHIFT)
+#endif
+#ifndef PAGE_MASK
+        #define PAGE_MASK (~(PAGE_SIZE - 1))
+#endif
+
 
 static std::atomic<bool> exit_loop(false);
 static void sigint_handler(int)
 {    exit_loop = true;
 }
 
-void configureScreen(NDIlib_video_frame_v2_t *video_recv);
-void showFrame(NDIlib_video_frame_v2_t *video_recv);
+bool configureScreen(NDIlib_video_frame_v2_t *video_recv);
+bool drawFrame(NDIlib_video_frame_v2_t *video_recv);
 static int xioctl(int fd, int request, void *arg);
 
 int main(int argc, char *argv[]) {
@@ -168,7 +194,10 @@ int main(int argc, char *argv[]) {
 #if SLOW_DEBUGGING
                 fprintf(stderr, "Video frame\n");
 #endif
-                showFrame(&video_recv);
+                if (!drawFrame(&video_recv)) {
+                    // The framebuffer configuration failed.  We can't do anything.
+                    exit_loop = true;
+                }
                 break;
 #ifdef ENABLE_AUDIO
             case NDIlib_frame_type_audio:
@@ -196,12 +225,12 @@ int main(int argc, char *argv[]) {
     p_NDILib->NDIlib_destroy();
 }
 
-void configureScreen(NDIlib_video_frame_v2_t *video_recv) {
+bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
     static bool configured = false;
-    if (configured) return;
+    if (configured) return true;
     configured = true;
 
-#if 1
+#if 0
     // Linux
 
     struct fb_bitfield {
@@ -272,6 +301,71 @@ void configureScreen(NDIlib_video_frame_v2_t *video_recv) {
         fprintf(stderr, "framebuffer read ioctl failed with error %d\n", error);
         exit(1);
     }
+#endif
+#if 1
+
+    // Read the current framebuffer settings so that we can restore them later.
+    int framebufferMemoryOffset = 0;
+    framebufferFileHandle = open("/dev/fb0", O_RDWR);
+    if (framebufferFileHandle == -1) {
+        perror("cameracontroller: open");
+        goto fail;
+    }
+    if (ioctl(framebufferFileHandle, FBIOGET_VSCREENINFO, &initialFramebufferConfiguration) == -1) {
+        perror("cameracontroller: FBIOGET_VSCREENINFO");
+        goto fail;
+    }
+    if (ioctl(framebufferFileHandle, FBIOGET_FSCREENINFO, &framebufferFixedConfiguration) == -1) {
+        perror("cameracontroller: FBIOGET_FSCREENINFO");
+        goto fail;
+    }
+    if (framebufferFixedConfiguration.type != FB_TYPE_PACKED_PIXELS) {
+        fprintf(stderr, "Error: Only packed pixel framebuffers are supported.\n");
+        goto fail;
+    }
+
+    framebufferMemoryOffset = (unsigned long)(framebufferFixedConfiguration.smem_start) & (~PAGE_MASK);
+    framebufferMemory = (unsigned char *)mmap(NULL, framebufferFixedConfiguration.smem_len + framebufferMemoryOffset, PROT_READ | PROT_WRITE, MAP_SHARED, framebufferFileHandle, 0);
+    if ((long)framebufferMemory == -1L) {
+        perror("cameracontroller: mmap");
+        goto fail;
+    }
+
+    // move viewport to upper left corner
+    if (initialFramebufferConfiguration.xoffset != 0 || initialFramebufferConfiguration.yoffset != 0) {
+        fprintf(stderr, "Shifting framebuffer offset from (%d, %d) to (0, 0)\n", initialFramebufferConfiguration.xoffset, initialFramebufferConfiguration.yoffset);
+        initialFramebufferConfiguration.xoffset = 0;
+        initialFramebufferConfiguration.yoffset = 0;
+        if (ioctl(framebufferFileHandle, FBIOPAN_DISPLAY, &initialFramebufferConfiguration) == -1) {
+                perror("cameracontroller: FBIOPAN_DISPLAY");
+                munmap(framebufferMemory, framebufferFixedConfiguration.smem_len);
+                goto fail;
+        }
+    }
+
+    framebufferActiveConfiguration = initialFramebufferConfiguration;
+    // framebufferActiveConfiguration.xoffset = 0;
+    // framebufferActiveConfiguration.yoffset = initialFramebufferConfiguration.yres - 1;
+    framebufferActiveConfiguration.xres_virtual = video_recv->xres;
+    framebufferActiveConfiguration.yres_virtual = video_recv->yres;
+
+    if (ioctl(framebufferFileHandle, FBIOPAN_DISPLAY, &framebufferActiveConfiguration) == -1) {
+        perror("cameracontroller: FBIOPAN_DISPLAY (2)");
+        munmap(framebufferMemory, framebufferFixedConfiguration.smem_len);
+        goto fail;
+    }
+
+    framebufferActiveMemory = framebufferMemory + framebufferMemoryOffset + (initialFramebufferConfiguration.yres * initialFramebufferConfiguration.xres * (initialFramebufferConfiguration.bits_per_pixel / 8));
+    return true;
+
+  fail:
+    if (ioctl(framebufferFileHandle, FBIOPUT_VSCREENINFO, &initialFramebufferConfiguration) == -1) {
+        perror("cameracontroller: FBIOPUT_VSCREENINFO");
+    }
+    if (ioctl(framebufferFileHandle, FBIOGET_FSCREENINFO, &framebufferFixedConfiguration) == -1) {
+        perror("cameracontroller: FBIOGET_FSCREENINFO");
+    }
+    return false;
 
 #else
   // Mac
@@ -280,17 +374,33 @@ void configureScreen(NDIlib_video_frame_v2_t *video_recv) {
 
 }
 
-void showFrame(NDIlib_video_frame_v2_t *video_recv) {
-    configureScreen(video_recv);
+bool drawFrame(NDIlib_video_frame_v2_t *video_recv) {
+    if (!configureScreen(video_recv)) {
+        return false;
+    }
 
     lseek(framebufferFileHandle, 0, SEEK_SET);
     write(framebufferFileHandle, video_recv->p_data, (video_recv->xres * video_recv->yres));
+    return true;
 }
 
 static int xioctl(int fd, int request, void *arg)
 {
     int r;
     do r = ioctl (fd, request, arg);
-    while (-1 == r && EINTR == errno);
+    while (r == -1 && EINTR == errno);
     return r;
 }
+
+
+void cleanupFrameBuffer(void) {
+    if (ioctl(framebufferFileHandle, FBIOPUT_VSCREENINFO, &initialFramebufferConfiguration) == -1) {
+        fprintf(stderr, "Ioctl FBIOPUT_VSCREENINFO error.\n");
+    }
+    if (ioctl(framebufferFileHandle, FBIOGET_FSCREENINFO, &framebufferFixedConfiguration) == -1) {
+        fprintf(stderr, "Ioctl FBIOGET_FSCREENINFO.\n");
+    }
+    munmap(framebufferMemory, framebufferFixedConfiguration.smem_len);
+    close(framebufferFileHandle);
+}
+
