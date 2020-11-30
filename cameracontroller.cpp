@@ -362,6 +362,9 @@ uint32_t scaledPosition(uint32_t x, uint32_t y) {
 }
 
 bool drawFrame(NDIlib_video_frame_v2_t *video_recv) {
+    int zero = 0;
+    ioctl(framebufferFileHandle, FBIO_WAITFORVSYNC, &zero);  // Should work, but doesn't.
+
     if (!configureScreen(video_recv)) {
         return false;
     }
