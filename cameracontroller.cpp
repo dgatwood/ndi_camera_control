@@ -33,7 +33,11 @@ struct fb_var_screeninfo initialFramebufferConfiguration;
 struct fb_var_screeninfo framebufferActiveConfiguration;
 struct fb_fix_screeninfo framebufferFixedConfiguration;
 unsigned char *framebufferMemory = NULL;
+unsigned char *framebufferBase = NULL;
 unsigned char *framebufferActiveMemory = NULL;
+
+int framebufferXRes = 0, framebufferYRes = 0, NDIXRes = 0, NDIYRes = 0;
+double xScaleFactor = 0.0, yScaleFactor = 0.0;
 
 #endif
 
@@ -161,7 +165,7 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    NDIlib_recv_create_v3_t NDI_recv_create_desc = { p_sources[source_number], NDIlib_recv_color_format_BGRX_BGRA , NDIlib_recv_bandwidth_highest, false, "NDIRec" };
+    NDIlib_recv_create_v3_t NDI_recv_create_desc = { p_sources[source_number], NDIlib_recv_color_format_BGRX_BGRA, NDIlib_recv_bandwidth_lowest, false, "NDIRec" };
 
     // Create the receiver
     NDIlib_recv_instance_t pNDI_recv = NDIlib_recv_create_v3(&NDI_recv_create_desc);
@@ -198,9 +202,11 @@ int main(int argc, char *argv[]) {
                     // The framebuffer configuration failed.  We can't do anything.
                     exit_loop = true;
                 }
+                NDIlib_recv_free_video_v2(pNDI_recv, &video_recv);
                 break;
 #ifdef ENABLE_AUDIO
             case NDIlib_frame_type_audio:
+                NDIlib_recv_free_audio_v2(pNDI_recv, &audio_recv);
 #endif
             default:
 #if SLOW_DEBUGGING
@@ -230,80 +236,7 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
     if (configured) return true;
     configured = true;
 
-#if 0
-    // Linux
-
-    struct fb_bitfield {
-        uint32_t offset;           /* beginning of bitfield    */
-        uint32_t length;           /* length of bitfield       */
-        uint32_t msb_right;        /* != 0 : Most significant bit is */ 
-                                   /* right */ 
-    };
-
-    struct framebuffer_screen_info {
-        uint32_t xres;                  /* visible resolution */
-        uint32_t yres;
-        uint32_t xres_virtual;          /* virtual resolution */
-        uint32_t yres_virtual;
-        uint32_t xoffset;               /* offset from virtual to visible */
-        uint32_t yoffset;               /* resolution */
-
-        uint32_t bits_per_pixel;
-        uint32_t grayscale;             /* !=0 Graylevels instead of colors */
-
-        struct fb_bitfield red;         /* bitfield in fb mem if true color, */
-        struct fb_bitfield green;       /* else only length is significant */
-        struct fb_bitfield blue;
-        struct fb_bitfield transp;      /* transparency */
-
-        uint32_t nonstd;                /* !=0 Non standard pixel format */
-
-        uint32_t activate;              /* see FB_ACTIVATE_x */
-
-        uint32_t height;                /* height of picture in mm */
-        uint32_t width;                 /* width of picture in mm */
-
-        uint32_t accel_flags;           /* acceleration flags (hints) */
-
-        /* Timing: All values in pixclocks, except pixclock (of course) */
-        uint32_t pixclock;              /* pixel clock in ps (pico seconds) */
-        uint32_t left_margin;           /* time from sync to picture */
-        uint32_t right_margin;          /* time from picture to sync */
-        uint32_t upper_margin;          /* time from sync to picture */
-        uint32_t lower_margin;
-        uint32_t hsync_len;             /* length of horizontal sync */
-        uint32_t vsync_len;             /* length of vertical sync */
-        uint32_t sync;                  /* see FB_SYNC_x */
-        uint32_t vmode;                 /* see FB_VMODE_x */
-        uint32_t reserved[6];           /* Reserved for future compatibility */
-    };
-
-    framebufferFileHandle = open("/dev/fb0", O_RDONLY);
-    if (framebufferFileHandle == -1) {
-        perror("cameracontroller");
-        fprintf(stderr, "Could not open framebuffer.\n");
-    }
-
-    struct framebuffer_screen_info screenInfo;
-    int error = xioctl(framebufferFileHandle, FBIOGET_VSCREENINFO, &screenInfo);
-    if (error != ESUCCESS) {
-        perror("cameracontroller");
-        fprintf(stderr, "framebuffer read ioctl failed with error %d\n", error);
-        exit(1);
-    }
-    screenInfo.xres_virtual = video_recv->xres;
-    screenInfo.yres_virtual = video_recv->yres;
-
-    screenInfo.activate = FB_ACTIVATE_NOW;
-    error = xioctl(framebufferFileHandle, FBIOPUT_VSCREENINFO, &screenInfo);
-    if (error != ESUCCESS) {
-        perror("cameracontroller");
-        fprintf(stderr, "framebuffer read ioctl failed with error %d\n", error);
-        exit(1);
-    }
-#endif
 #if 1
-
     // Read the current framebuffer settings so that we can restore them later.
     int framebufferMemoryOffset = 0;
     framebufferFileHandle = open("/dev/fb0", O_RDWR);
@@ -325,12 +258,14 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
     }
 
     framebufferMemoryOffset = (unsigned long)(framebufferFixedConfiguration.smem_start) & (~PAGE_MASK);
+    // framebufferMemory = (unsigned char *)mmap(NULL, framebufferFixedConfiguration.smem_len + framebufferMemoryOffset, PROT_READ | PROT_WRITE, MAP_SHARED, framebufferFileHandle, 0);
     framebufferMemory = (unsigned char *)mmap(NULL, framebufferFixedConfiguration.smem_len + framebufferMemoryOffset, PROT_READ | PROT_WRITE, MAP_SHARED, framebufferFileHandle, 0);
     if ((long)framebufferMemory == -1L) {
         perror("cameracontroller: mmap");
         goto fail;
     }
 
+#if 0
     // move viewport to upper left corner
     if (initialFramebufferConfiguration.xoffset != 0 || initialFramebufferConfiguration.yoffset != 0) {
         fprintf(stderr, "Shifting framebuffer offset from (%d, %d) to (0, 0)\n", initialFramebufferConfiguration.xoffset, initialFramebufferConfiguration.yoffset);
@@ -342,12 +277,27 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
                 goto fail;
         }
     }
+#endif
 
     framebufferActiveConfiguration = initialFramebufferConfiguration;
+    framebufferActiveConfiguration.xoffset = 0;
+    framebufferActiveConfiguration.yoffset = 0;
     // framebufferActiveConfiguration.xoffset = 0;
     // framebufferActiveConfiguration.yoffset = initialFramebufferConfiguration.yres - 1;
-    framebufferActiveConfiguration.xres_virtual = video_recv->xres;
-    framebufferActiveConfiguration.yres_virtual = video_recv->yres;
+    // framebufferActiveConfiguration.xres = video_recv->xres;
+    // framebufferActiveConfiguration.yres = video_recv->yres;
+
+    // framebufferActiveConfiguration.bits_per_pixel = 32;
+    framebufferXRes = framebufferActiveConfiguration.xres;
+    framebufferYRes = framebufferActiveConfiguration.yres;
+    NDIXRes = video_recv->xres;
+    NDIYRes = video_recv->yres;
+
+    xScaleFactor = ((double)(framebufferXRes) / (double)(NDIXRes));
+    yScaleFactor = ((double)(framebufferYRes) / (double)(NDIYRes));
+
+    fprintf(stderr, "NDI Xres: %d, Yres: %d\n", video_recv->xres, video_recv->yres);
+    fprintf(stderr, "Xres: %d, Yres: %d, bpp: %d\n", framebufferActiveConfiguration.xres, framebufferActiveConfiguration.yres, framebufferActiveConfiguration.bits_per_pixel);
 
     if (ioctl(framebufferFileHandle, FBIOPAN_DISPLAY, &framebufferActiveConfiguration) == -1) {
         perror("cameracontroller: FBIOPAN_DISPLAY (2)");
@@ -355,6 +305,7 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
         goto fail;
     }
 
+    framebufferBase = framebufferMemory + framebufferMemoryOffset;
     framebufferActiveMemory = framebufferMemory + framebufferMemoryOffset + (initialFramebufferConfiguration.yres * initialFramebufferConfiguration.xres * (initialFramebufferConfiguration.bits_per_pixel / 8));
     return true;
 
@@ -374,13 +325,85 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
 
 }
 
+uint16_t convert_sample(uint32_t sample) {
+    // AA RR GG BB
+
+    // printf("Sample: 0x%x\n", sample);
+    uint8_t r = (sample >> 16) & 0xff;
+    uint8_t g = (sample >>  8) & 0xff;
+    uint8_t b = (sample >>  0) & 0xff;
+    // uint8_t g = 0;
+    // uint8_t b = 0;
+    return ((r >> 3) << 11) | ((g >> 2) << 5) | (g >> 3);
+
+    // return 0b1111100000010000;
+    //       ..rrrrrggggggbbbbb;
+}
+
+// Takes frame coordinate and returns index into framebuffer.
+uint32_t scaledRow(uint32_t y) {
+    return y * yScaleFactor;
+}
+
+// Takes frame coordinate and returns index into framebuffer.
+uint32_t scaledColumn(uint32_t x) {
+    return x * xScaleFactor;
+}
+
+// Takes framebuffer coordinate and returns index into frame.
+uint32_t scaledPosition(uint32_t x, uint32_t y) {
+    static int maxPos = 0;
+    if (x > NDIXRes) return 0;
+    if (y > NDIYRes) return 0;
+    // uint32_t scaledX = x / xScaleFactor;
+    // uint32_t scaledY = y / yScaleFactor;
+    // return scaledX + (scaledY * NDIXRes);
+    return (y * NDIXRes) + x;
+}
+
 bool drawFrame(NDIlib_video_frame_v2_t *video_recv) {
     if (!configureScreen(video_recv)) {
         return false;
     }
+    // memset(framebufferBase, 0xffffffff, (video_recv->xres * video_recv->yres * 2));
+    // memset(framebufferBase, 0xffffffff, (video_recv->xres * video_recv->yres * 2));
 
-    lseek(framebufferFileHandle, 0, SEEK_SET);
-    write(framebufferFileHandle, video_recv->p_data, (video_recv->xres * video_recv->yres));
+#if 1
+    //bcopy(video_recv->p_data, framebufferBase, (video_recv->xres * video_recv->yres * 2));
+    uint32_t *inBuf = (uint32_t *)video_recv->p_data;
+    uint16_t *outBuf = (uint16_t *)framebufferBase;
+    for (int y = 0; y < video_recv->yres; y++) {
+        int minRow = scaledRow(y);
+        int maxRow = scaledRow(y+1) - 1;
+        for (int x = 0; x < video_recv->xres; x++) {
+            uint32_t *inPos = &inBuf[(y * video_recv->xres) + x];
+            for (int outX = scaledColumn(x); outX < scaledColumn(x+1); outX++) {
+                uint16_t *outPos = &outBuf[(minRow * framebufferXRes) + outX];
+                *outPos = convert_sample(*inPos);
+            }
+        }
+        for (int row = minRow + 1; row <= maxRow; row++) {
+            bcopy(&outBuf[(minRow * framebufferXRes)],
+                  &outBuf[(row * framebufferXRes)], framebufferXRes * 2);
+        }
+    }
+#else
+    for (int y = 0; y < framebufferYRes; y++) {
+        for (int x = 0; x < framebufferXRes; x++) {
+            uint32_t pos = (y * framebufferXRes) + x;
+            uint16_t *outPos = (uint16_t *)&framebufferBase[(pos * 2)];
+            uint32_t *inPos = (uint32_t *)&video_recv->p_data[(scaledPosition(x, y) * 4)];
+            *outPos = convert_sample(*inPos);
+        }
+    }
+#endif
+
+    // bcopy(video_recv->p_data, framebufferBase, (video_recv->xres * video_recv->yres * 4));
+// framebufferActiveMemory
+// framebufferBase
+
+    // lseek(framebufferFileHandle, 0, SEEK_SET);
+    // write(framebufferFileHandle, video_recv->p_data, (video_recv->xres * video_recv->yres));
     return true;
 }
 
