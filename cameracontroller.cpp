@@ -19,7 +19,7 @@
 
 #include <Processing.NDI.Lib.h>
 
-#if 1
+#ifdef __linux__
 #include <linux/kd.h>
 #include <linux/vt.h>
 #include <linux/fb.h>
@@ -39,17 +39,19 @@ unsigned char *framebufferActiveMemory = NULL;
 int framebufferXRes = 0, framebufferYRes = 0, NDIXRes = 0, NDIYRes = 0;
 double xScaleFactor = 0.0, yScaleFactor = 0.0;
 
+#else
+// Mac
+
+#import <AppKit/AppKit.h>
+#import <CoreServices/CoreServices.h>
+#import <ImageIO/ImageIO.h>
+
+NSWindow *mainWindow = nil;
+NSImageView *mainImageView = nil;
+
 #endif
 
 #define SLOW_DEBUGGING 0
-
-#if 0
-#define ESUCCESS 0
-
-#define FBIOGET_VSCREENINFO 0x4600
-#define FBIOPUT_VSCREENINFO 0x4601
-#define FB_ACTIVATE_NOW     0   /* set values immediately (or vbl)*/
-#endif
 
 #ifndef PAGE_SHIFT
         #define PAGE_SHIFT 12
@@ -72,21 +74,30 @@ bool drawFrame(NDIlib_video_frame_v2_t *video_recv);
 static int xioctl(int fd, int request, void *arg);
 
 int main(int argc, char *argv[]) {
-    std::string ndi_path;
     if (argc < 2) {
         fprintf(stderr, "Usage: camera_control \"stream name\"\n");
         fprintf(stderr, "Known sources:\n");
     }
     char *stream_name = argv[1];
 
-#if 1
+#ifndef __linux__
+    dispatch_queue_t queue = dispatch_queue_create("ndi run loop", 0);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), queue, ^{
+#endif
+
+    std::string ndi_path;
+
     /* BEGIN CRAP: Everything about the code below is gross, but it's boilerplate code. */
     const char* p_NDI_runtime_folder = ::getenv("NDI_RUNTIME_DIR_V4");
     if (p_NDI_runtime_folder) {
         ndi_path = p_NDI_runtime_folder;
         ndi_path += "/libndi.dylib";
     } else {
+#ifdef __linux__
         ndi_path = "/usr/local/NDISDK/lib/arm-rpi3-linux-gnueabihf/libndi.so.4"; // The standard versioning scheme on Linux based systems using sym links
+#else
+        ndi_path = "libndi.4.dylib"; // The standard versioning scheme on Linux based systems using sym links
+#endif
     }
 
     // Try to load the library
@@ -100,9 +111,8 @@ int main(int argc, char *argv[]) {
 
     if (!NDIlib_v3_load) {
         printf("Please re-install the NewTek NDI Runtimes to use this application.");
-        return 0;
+        exit(0);
     }
-#endif
 
     // Lets get all of the DLL entry points
     const NDIlib_v3 *p_NDILib = NDIlib_v4_load();
@@ -112,7 +122,7 @@ int main(int argc, char *argv[]) {
     {    // Cannot run NDI. Most likely because the CPU is not sufficient (see SDK documentation).
         // you can check this directly with a call to NDIlib_is_supported_CPU()
         printf("Cannot run NDI.");
-        return 0;
+        exit(0);
     }
 
     /* END CRAP: Everything about the code above is gross, but it's boilerplate code. */
@@ -125,7 +135,7 @@ int main(int argc, char *argv[]) {
 
     // Create a finder
     NDIlib_find_instance_t pNDI_find = p_NDILib->NDIlib_find_create_v2(&NDI_find_create_desc);
-    if (!pNDI_find) return 0;
+    if (!pNDI_find) exit(0);
 
     // We wait until there is at least one source on the network
     uint32_t no_sources = 0;
@@ -137,7 +147,7 @@ int main(int argc, char *argv[]) {
     }
 
     // We need at least one source
-    if (!p_sources) return 0;
+    if (!p_sources) exit(0);
 
     int source_number = -1;
     if (stream_name) {
@@ -172,7 +182,7 @@ int main(int argc, char *argv[]) {
 
     if (!pNDI_recv)
     {    p_NDILib->NDIlib_find_destroy(pNDI_find);
-        return 0;
+        exit(0);
     }
 
     // Destroy the NDI finder. We needed to have access to the pointers to p_sources[0]
@@ -229,6 +239,14 @@ int main(int argc, char *argv[]) {
 
     // Not required, but nice
     p_NDILib->NDIlib_destroy();
+#ifndef __linux__
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CFRunLoopStop(CFRunLoopGetMain());
+        });
+    });
+#endif
+    NSApplicationLoad();
+    CFRunLoopRun();
 }
 
 bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
@@ -236,7 +254,7 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
     if (configured) return true;
     configured = true;
 
-#if 1
+#ifdef __linux__
     // Read the current framebuffer settings so that we can restore them later.
     int framebufferMemoryOffset = 0;
     framebufferFileHandle = open("/dev/fb0", O_RDWR);
@@ -266,6 +284,7 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
     }
 
 #if 0
+    // This is for doing double buffering, but RPi apparently doesn't support that (or vsync in general).
     // move viewport to upper left corner
     if (initialFramebufferConfiguration.xoffset != 0 || initialFramebufferConfiguration.yoffset != 0) {
         fprintf(stderr, "Shifting framebuffer offset from (%d, %d) to (0, 0)\n", initialFramebufferConfiguration.xoffset, initialFramebufferConfiguration.yoffset);
@@ -319,12 +338,24 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
     return false;
 
 #else
-  // Mac
+    // Mac
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        NSRect frame = NSMakeRect(0, 0, video_recv->xres, video_recv->yres);
+        mainWindow = [[NSWindow alloc] initWithContentRect:frame
+                                                 styleMask:NSWindowStyleMaskTitled
+                                                   backing:NSBackingStoreBuffered
+                                                     defer:NO];
+        [mainWindow setBackgroundColor:[NSColor whiteColor]];
+        mainImageView = [[NSImageView alloc] initWithFrame:frame];
+        [[mainWindow contentView] addSubview:mainImageView];
+        [mainWindow makeKeyAndOrderFront:mainWindow];
+    });
 
+    return true;
 #endif
-
 }
 
+#ifdef __linux__
 uint16_t convert_sample(uint32_t sample) {
     // AA RR GG BB
 
@@ -371,7 +402,6 @@ bool drawFrame(NDIlib_video_frame_v2_t *video_recv) {
     // memset(framebufferBase, 0xffffffff, (video_recv->xres * video_recv->yres * 2));
     // memset(framebufferBase, 0xffffffff, (video_recv->xres * video_recv->yres * 2));
 
-#if 1
     //bcopy(video_recv->p_data, framebufferBase, (video_recv->xres * video_recv->yres * 2));
     uint32_t *inBuf = (uint32_t *)video_recv->p_data;
     uint16_t *outBuf = (uint16_t *)framebufferBase;
@@ -390,23 +420,7 @@ bool drawFrame(NDIlib_video_frame_v2_t *video_recv) {
                   &outBuf[(row * framebufferXRes)], framebufferXRes * 2);
         }
     }
-#else
-    for (int y = 0; y < framebufferYRes; y++) {
-        for (int x = 0; x < framebufferXRes; x++) {
-            uint32_t pos = (y * framebufferXRes) + x;
-            uint16_t *outPos = (uint16_t *)&framebufferBase[(pos * 2)];
-            uint32_t *inPos = (uint32_t *)&video_recv->p_data[(scaledPosition(x, y) * 4)];
-            *outPos = convert_sample(*inPos);
-        }
-    }
-#endif
 
-    // bcopy(video_recv->p_data, framebufferBase, (video_recv->xres * video_recv->yres * 4));
-// framebufferActiveMemory
-// framebufferBase
-
-    // lseek(framebufferFileHandle, 0, SEEK_SET);
-    // write(framebufferFileHandle, video_recv->p_data, (video_recv->xres * video_recv->yres));
     return true;
 }
 
@@ -430,3 +444,54 @@ void cleanupFrameBuffer(void) {
     close(framebufferFileHandle);
 }
 
+#else
+
+BOOL CGImageWriteToFile(CGImageRef image, NSString *path) {
+    CFURLRef url = (__bridge CFURLRef)[NSURL fileURLWithPath:path];
+    CGImageDestinationRef destination = CGImageDestinationCreateWithURL(url, kUTTypePNG, 1, NULL);
+    if (!destination) {
+        NSLog(@"Failed to create CGImageDestination for %@", path);
+        return NO;
+    }
+
+    CGImageDestinationAddImage(destination, image, nil);
+
+    if (!CGImageDestinationFinalize(destination)) {
+        NSLog(@"Failed to write image to %@", path);
+        CFRelease(destination);
+        return NO;
+    }
+
+    CFRelease(destination);
+    return YES;
+}
+
+bool drawFrame(NDIlib_video_frame_v2_t *video_recv) {
+    if (!configureScreen(video_recv)) {
+        return false;
+    }
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        CGContextRef bitmapBuffer = CGBitmapContextCreateWithData(video_recv->p_data, video_recv->xres, video_recv->yres,
+                                                                  8, (video_recv->xres * 4), CGColorSpaceCreateDeviceRGB(),
+                                                                  kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little,
+                                                                  NULL, NULL);
+
+        CGImageRef imageRef = CGBitmapContextCreateImage(bitmapBuffer);
+#if 0
+//        CGImageWriteToFile(imageRef, @"/tmp/test.png");
+        NSGraphicsContext *windowGraphicsContext = [NSGraphicsContext graphicsContextWithWindow:mainWindow];
+        CGContextRef windowCoreGraphicsContext = [windowGraphicsContext CGContext];
+        CGContextDrawImage(windowCoreGraphicsContext, NSMakeRect(0, 0, video_recv->xres, video_recv->yres), imageRef);
+//        [windowGraphicsContext flushGraphics];
+        CFRelease(imageRef);
+        CFRelease(bitmapBuffer);
+#else
+        NSImage *image = [[NSImage alloc] initWithCGImage:imageRef size:CGSizeMake(video_recv->xres, video_recv->yres)];
+        CFRelease(imageRef);
+        mainImageView.image = image;
+#endif
+    });
+    return true;
+}
+
+#endif
