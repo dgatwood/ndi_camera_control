@@ -28,6 +28,9 @@
     #include <linux/input.h>
     #include <sys/mman.h>
     #include <sys/user.h>
+
+    #define I2C_ADDRESS 0x20
+
 #else
     // Mac (partial support for testing)
     #import <AppKit/AppKit.h>
@@ -73,6 +76,8 @@ enum {
 #pragma mark - Globals
 
 #if __linux__
+    ioexpander_t *io_expander;
+
     // Linux framebuffer
     int g_framebufferFileHandle = -1;
     struct fb_var_screeninfo g_initialFramebufferConfiguration;
@@ -105,6 +110,11 @@ void *runPTZThread(void *argIgnored);
 void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv);
 static int xioctl(int fd, int request, void *arg);
 
+#ifdef __linux__
+int pinNumberForAxis(int axis);
+int pinNumberForButton(int button);
+#endif
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Usage: camera_control \"stream name\"\n");
@@ -115,7 +125,15 @@ int main(int argc, char *argv[]) {
     pthread_mutex_init(&g_motionMutex, PTHREAD_MUTEX_NORMAL);
     pthread_create(&motionThread, NULL, runPTZThread, NULL);
 
-#ifndef __linux__
+#ifdef __linux__
+    io_expander newIOExpander(I2C_ADDRESS, 0, -1, 0, false);
+    for (int pin = 0; pin < 2; pin++) {
+        ioe_set_mode(io_expander, pinNumberForAxis(pin), PIN_MODE_ADC, false, false);
+    }
+    for (int button = 0; button < MAX_BUTTONS; button++) {
+        ioe_set_mode(io_expander, pinNumberForButton(button), PIN_MODE_IN, false, false);
+    }
+#else
     dispatch_queue_t queue = dispatch_queue_create("ndi run loop", 0);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), queue, ^{
 #endif
@@ -565,7 +583,8 @@ float readAxisPosition(int axis) {
     // For Y axis, up should be positive.
     // For zoom, clockwise (zooming in) should be positive.
     #ifdef __linux__
-        return 0.0;
+        int pin = pinNumberForAxis(int axis);
+        return input(ioe, pin, 0.001) / 2048.0;
     #else
         char *filename;
         asprintf(&filename, "/var/tmp/axis.%d", axis);
@@ -590,6 +609,8 @@ float readAxisPosition(int axis) {
 bool readButton(int buttonNumber) {
     #ifdef __linux__
         return false;
+        int pin = pinNumberForButton(int axis);
+        return input(ioe, pin, 0.001) > 512;  // If logic high, return true.
     #else
         // Return true if a file exists called /var/tmp/button.%d.
         char *filename;
@@ -609,6 +630,17 @@ bool readButton(int buttonNumber) {
         return false;
     #endif
 }
+
+#ifdef __linux__
+int pinNumberForAxis(int axis) {
+    return 0;
+}
+
+int pinNumberForButton(int button) {
+    return 0;
+}
+#endif
+
 
 void updatePTZValues() {
     motionData_t newMotionData;
