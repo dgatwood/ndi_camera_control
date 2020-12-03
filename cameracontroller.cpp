@@ -29,7 +29,7 @@
     #include <sys/mman.h>
     #include <sys/user.h>
 
-    #define I2C_ADDRESS 0x20
+    #define I2C_ADDRESS 0x18
 
 #else
     // Mac (partial support for testing)
@@ -121,8 +121,6 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Known sources:\n");
     }
     char *stream_name = argv[1];
-    pthread_t motionThread;
-    pthread_create(&motionThread, NULL, runPTZThread, NULL);
 
 #ifdef __linux__
     io_expander = newIOExpander(I2C_ADDRESS, 0, -1, 0, false);
@@ -132,7 +130,12 @@ int main(int argc, char *argv[]) {
     for (int button = 0; button < MAX_BUTTONS; button++) {
         ioe_set_mode(io_expander, pinNumberForButton(button), PIN_MODE_IN, false, false);
     }
-#else
+#endif
+
+    pthread_t motionThread;
+    pthread_create(&motionThread, NULL, runPTZThread, NULL);
+
+#ifndef __linux__
     dispatch_queue_t queue = dispatch_queue_create("ndi run loop", 0);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), queue, ^{
 #endif
@@ -585,6 +588,7 @@ float readAxisPosition(int axis) {
         int pin = pinNumberForAxis(axis);
         int rawValue = input(io_expander, pin, 0.001);
         float value = rawValue / 2048.0;
+
         fprintf(stderr, "axis %d: raw: %d scaled: %f\n", axis, rawValue, value);
         return value;
     #else
@@ -614,6 +618,7 @@ bool readButton(int buttonNumber) {
         int pin = pinNumberForButton(buttonNumber);
         int rawValue = input(io_expander, pin, 0.001);
         bool value = (rawValue > 512);  // If logic high, return true.
+
         fprintf(stderr, "button %d: raw: %d scaled: %s\n", buttonNumber, rawValue, value ? "true" : "false");
         return value;
     #else
@@ -638,11 +643,11 @@ bool readButton(int buttonNumber) {
 
 #ifdef __linux__
 int pinNumberForAxis(int axis) {
-    return axis + 1;
+    return axis + 10;
 }
 
 int pinNumberForButton(int button) {
-    return button + 4;
+    return button + 1;
 }
 #endif
 
