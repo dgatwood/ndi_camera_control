@@ -583,7 +583,10 @@ float readAxisPosition(int axis) {
     // For zoom, clockwise (zooming in) should be positive.
     #ifdef __linux__
         int pin = pinNumberForAxis(axis);
-        return input(io_expander, pin, 0.001) / 2048.0;
+        int rawValue = input(io_expander, pin, 0.001);
+        float value = rawValue / 2048.0;
+        fprintf(stderr, "axis %d: raw: %d scaled: %f\n", axis, rawValue, value);
+        return value;
     #else
         char *filename;
         asprintf(&filename, "/var/tmp/axis.%d", axis);
@@ -609,7 +612,10 @@ bool readButton(int buttonNumber) {
     #ifdef __linux__
         return false;
         int pin = pinNumberForButton(buttonNumber);
-        return input(io_expander, pin, 0.001) > 512;  // If logic high, return true.
+        int rawValue = input(io_expander, pin, 0.001);
+        bool value = (rawValue > 512);  // If logic high, return true.
+        fprintf(stderr, "button %d: raw: %d scaled: %s\n", buttonNumber, rawValue, value ? "true" : "false");
+        return value;
     #else
         // Return true if a file exists called /var/tmp/button.%d.
         char *filename;
@@ -632,11 +638,11 @@ bool readButton(int buttonNumber) {
 
 #ifdef __linux__
 int pinNumberForAxis(int axis) {
-    return 0;
+    return axis + 1;
 }
 
 int pinNumberForButton(int button) {
-    return 0;
+    return button + 4;
 }
 #endif
 
