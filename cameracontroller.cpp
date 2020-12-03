@@ -76,7 +76,7 @@ enum {
 #pragma mark - Globals
 
 #if __linux__
-    ioexpander_t *io_expander;
+    ioexpander_t *io_expander = NULL;
 
     // Linux framebuffer
     int g_framebufferFileHandle = -1;
@@ -95,7 +95,7 @@ enum {
 #endif
 
 bool g_ptzEnabled = false;
-pthread_mutex_t g_motionMutex;
+pthread_mutex_t g_motionMutex = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER_NP;
 
 motionData_t g_motionData;
 
@@ -122,11 +122,10 @@ int main(int argc, char *argv[]) {
     }
     char *stream_name = argv[1];
     pthread_t motionThread;
-    pthread_mutex_init(&g_motionMutex, PTHREAD_MUTEX_NORMAL);
     pthread_create(&motionThread, NULL, runPTZThread, NULL);
 
 #ifdef __linux__
-    io_expander newIOExpander(I2C_ADDRESS, 0, -1, 0, false);
+    io_expander = newIOExpander(I2C_ADDRESS, 0, -1, 0, false);
     for (int pin = 0; pin < 2; pin++) {
         ioe_set_mode(io_expander, pinNumberForAxis(pin), PIN_MODE_ADC, false, false);
     }
@@ -306,9 +305,9 @@ int main(int argc, char *argv[]) {
             CFRunLoopStop(CFRunLoopGetMain());
         });
     });
-#endif
     NSApplicationLoad();
     CFRunLoopRun();
+#endif
 }
 
 bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
@@ -583,8 +582,8 @@ float readAxisPosition(int axis) {
     // For Y axis, up should be positive.
     // For zoom, clockwise (zooming in) should be positive.
     #ifdef __linux__
-        int pin = pinNumberForAxis(int axis);
-        return input(ioe, pin, 0.001) / 2048.0;
+        int pin = pinNumberForAxis(axis);
+        return input(io_expander, pin, 0.001) / 2048.0;
     #else
         char *filename;
         asprintf(&filename, "/var/tmp/axis.%d", axis);
@@ -609,8 +608,8 @@ float readAxisPosition(int axis) {
 bool readButton(int buttonNumber) {
     #ifdef __linux__
         return false;
-        int pin = pinNumberForButton(int axis);
-        return input(ioe, pin, 0.001) > 512;  // If logic high, return true.
+        int pin = pinNumberForButton(buttonNumber);
+        return input(io_expander, pin, 0.001) > 512;  // If logic high, return true.
     #else
         // Return true if a file exists called /var/tmp/button.%d.
         char *filename;
