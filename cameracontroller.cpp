@@ -589,7 +589,9 @@ float readAxisPosition(int axis) {
         int rawValue = input(io_expander, pin, 0.001);
         float value = rawValue / 2048.0;
 
+#if SLOW_DEBUGGING
         fprintf(stderr, "axis %d: raw: %d scaled: %f\n", axis, rawValue, value);
+#endif
         return value;
     #else
         char *filename;
@@ -614,12 +616,13 @@ float readAxisPosition(int axis) {
 
 bool readButton(int buttonNumber) {
     #ifdef __linux__
-        return false;
         int pin = pinNumberForButton(buttonNumber);
         int rawValue = input(io_expander, pin, 0.001);
-        bool value = (rawValue > 512);  // If logic high, return true.
+        bool value = (rawValue == HIGH);  // If logic high, return true.
 
+#if SLOW_DEBUGGING
         fprintf(stderr, "button %d: raw: %d scaled: %s\n", buttonNumber, rawValue, value ? "true" : "false");
+#endif
         return value;
     #else
         // Return true if a file exists called /var/tmp/button.%d.
