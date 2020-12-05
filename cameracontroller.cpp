@@ -127,8 +127,9 @@ int main(int argc, char *argv[]) {
     for (int pin = 0; pin < 2; pin++) {
         ioe_set_mode(io_expander, pinNumberForAxis(pin), PIN_MODE_ADC, false, false);
     }
-    for (int button = 0; button < MAX_BUTTONS; button++) {
-        ioe_set_mode(io_expander, pinNumberForButton(button), PIN_MODE_IN, false, false);
+    // Button 0 is BUTTON_SET.  Configure it like the other buttons.
+    for (int button = 0; button <= MAX_BUTTONS; button++) {
+        ioe_set_mode(io_expander, pinNumberForButton(button), PIN_MODE_PU, false, false);
     }
 #endif
 
@@ -565,9 +566,11 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     }
     NDIlib_recv_ptz_zoom_speed(pNDI_recv, copyOfMotionData.zoomPosition);
     NDIlib_recv_ptz_pan_tilt_speed(pNDI_recv, copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
+#if SLOW_DEBUGGING
     if (copyOfMotionData.xAxisPosition != 0 || copyOfMotionData.yAxisPosition != 0) {
         fprintf(stderr, "xSpeed: %f, ySpeed; %f\n", copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
     }
+#endif
     if (copyOfMotionData.retrievePositionNumber > 0 &&
         copyOfMotionData.retrievePositionNumber != lastMotionData.retrievePositionNumber) {
         fprintf(stderr, "Retrieving position %d\n", copyOfMotionData.retrievePositionNumber);
@@ -618,7 +621,7 @@ bool readButton(int buttonNumber) {
     #ifdef __linux__
         int pin = pinNumberForButton(buttonNumber);
         int rawValue = input(io_expander, pin, 0.001);
-        bool value = (rawValue == HIGH);  // If logic high, return true.
+        bool value = (rawValue == LOW);  // If logic low (grounded), return true.
 
 #if SLOW_DEBUGGING
         fprintf(stderr, "button %d: raw: %d scaled: %s\n", buttonNumber, rawValue, value ? "true" : "false");
@@ -665,7 +668,9 @@ void updatePTZValues() {
     bool isSetButtonDown = readButton(BUTTON_SET);
     newMotionData.storePositionNumber = 0;
     newMotionData.retrievePositionNumber = 0;
-    for (int i = 0; i < MAX_BUTTONS; i++) {
+
+    // Button 0 is BUTTON_SET.  Don't query its status.
+    for (int i = 1; i <= MAX_BUTTONS; i++) {
         if (readButton(i)) {
             if (isSetButtonDown) {
                 newMotionData.storePositionNumber = i;
