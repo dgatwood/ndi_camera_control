@@ -1,0 +1,13 @@
+Buttons (PIN_MODE_PU): Ground to change state.
+Set buttom (0): pin 1
+Button 1:       pin 2
+Button 2:       pin 3
+Button 3:       pin 4
+Button 4:       pin 5
+Button 5:       pin 6
+Button 6:       pin 7
+
+Axes (PIN_MODE_ADC)
+X axis (1):     pin 11
+Y axis (2):     pin 12
+Zoom axis (3):  pin 13
