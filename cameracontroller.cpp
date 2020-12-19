@@ -666,6 +666,13 @@ void updatePTZValues() {
     newMotionData.zoomPosition = readAxisPosition(kPTZAxisZoom);
 
     bool isSetButtonDown = readButton(BUTTON_SET);
+    static bool showedInitialState = false;
+    static bool lastSetButtonDown = false;
+    if (!showedInitialState || (isSetButtonDown != lastSetButtonDown)) {
+        fprintf(stderr, "Set button %s\n", isSetButtonDown ? "DOWN" : "UP");
+        showedInitialState = true;
+    }
+    lastSetButtonDown = isSetButtonDown;
     newMotionData.storePositionNumber = 0;
     newMotionData.retrievePositionNumber = 0;
 
