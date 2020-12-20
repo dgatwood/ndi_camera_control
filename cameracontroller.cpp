@@ -481,9 +481,15 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
         if (!configureScreen(video_recv)) {
             return false;
         }
-        if (g_xScaleFactor == 1.0 && g_yScaleFactor && monitor_bytes_per_pixel == 32) {
+        if (g_xScaleFactor == 1.0 && g_yScaleFactor == 1.0 && monitor_bytes_per_pixel == 4) {
+            if (enable_debugging) {
+                fprintf(stderr, "fastpath\n");
+            }
             bcopy(video_recv->p_data, g_framebufferBase, (video_recv->xres * video_recv->yres * 4));
         } else {
+            if (enable_debugging) {
+                fprintf(stderr, "slowpath (%f / %f)\n", g_xScaleFactor, g_yScaleFactor);
+            }
             uint32_t *inBuf = (uint32_t *)video_recv->p_data;
             uint16_t *outBuf16 = (uint16_t *)g_framebufferBase;
             uint32_t *outBuf32 = (uint32_t *)g_framebufferBase;
