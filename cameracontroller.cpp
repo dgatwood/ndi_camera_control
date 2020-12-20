@@ -22,7 +22,6 @@
 #include <Processing.NDI.Lib.h>
 
 // #define USE_PREVIEW_RESOLUTION
-// #define SCALE_720P32_TO_1080P15_LINUX
 
 #ifdef __linux__
     #include <linux/kd.h>
@@ -383,9 +382,6 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
     // g_framebufferActiveConfiguration.yres = video_recv->yres;
 
     monitor_bytes_per_pixel = g_framebufferActiveConfiguration.bits_per_pixel / 8;
-// #ifndef SCALE_720P32_TO_1080P15_LINUX
-    // g_framebufferActiveConfiguration.bits_per_pixel = 32;
-// #endif
     g_framebufferXRes = g_framebufferActiveConfiguration.xres;
     g_framebufferYRes = g_framebufferActiveConfiguration.yres;
     g_NDIXRes = video_recv->xres;
