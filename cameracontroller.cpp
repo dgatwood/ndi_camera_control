@@ -21,7 +21,8 @@
 
 #include <Processing.NDI.Lib.h>
 
-// #define USE_PREVIEW_RESOLUTION
+// This must be set correctly in Linux, because the NDI library is bizarre.
+#define NDI_LIBRARY_PATH "/usr/local/NDISDK/lib/arm-rpi3-linux-gnueabihf/libndi.so.4"
 
 #ifdef __linux__
     #include <linux/kd.h>
@@ -33,20 +34,34 @@
 
     #define I2C_ADDRESS 0x18
 
-#else
-    // Mac (partial support for testing)
+#else  // ! __linux__
+    // Mac (partial support for testing).  Reads button values from files:
+    //     /var/tmp/axis.0 through 2 for X/Y/Zoom values.
+    //     /var/tmp/button.0 (set button) - button down if file exists.
+    //     /var/tmp/button.1 through 6 - button down if file exists.
+
     #import <AppKit/AppKit.h>
     #import <CoreServices/CoreServices.h>
     #import <ImageIO/ImageIO.h>
-#endif
+#endif  // __linux__
 
 #include "ioexpander.c"
 
 int monitor_bytes_per_pixel = 4;
 
+/*
+ * Controlled by the -f (--fast) flag.
+ *
+ * If true, this tool requests a low-quality stream (typically 720p).
+ * If false, it requests a high-quality stream (typically 1080p).
+ */
+bool use_low_res_preview = false;
+
+/* Enable debugging (controlled by the -d / --debug flag). */
+bool enable_debugging = false;
+
 #pragma mark - Constants and types
 
-#define SLOW_DEBUGGING 0
 
 #ifdef __linux__
     #ifndef PAGE_SHIFT
@@ -93,10 +108,10 @@ enum {
 
     int g_framebufferXRes = 0, g_framebufferYRes = 0, g_NDIXRes = 0, g_NDIYRes = 0;
     double g_xScaleFactor = 0.0, g_yScaleFactor = 0.0;
-#else
+#else  // ! __linux__
     NSWindow *g_mainWindow = nil;
     NSImageView *g_mainImageView = nil;
-#endif
+#endif  // __linux__
 
 bool g_ptzEnabled = false;
 pthread_mutex_t g_motionMutex = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER_NP;
@@ -112,19 +127,28 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv);
 bool drawFrame(NDIlib_video_frame_v2_t *video_recv);
 void *runPTZThread(void *argIgnored);
 void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv);
-static int xioctl(int fd, int request, void *arg);
 
 #ifdef __linux__
 int pinNumberForAxis(int axis);
 int pinNumberForButton(int button);
-#endif
+#endif  // __linux__
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Usage: camera_control \"stream name\"\n");
         fprintf(stderr, "Known sources:\n");
     }
-    char *stream_name = argv[1];
+    char *stream_name = argv[argc - 1];
+    for (int i = 1; i < argc - 1; i++) {
+        if (!strcmp(argv[i], "-d") || !strcmp(argv[i], "--debug")) {
+            fprintf(stderr, "Enabling debugging (slow).\n");
+            enable_debugging = true;
+        }
+        if (!strcmp(argv[i], "-f") || !strcmp(argv[i], "--fast")) {
+            fprintf(stderr, "Using low-res mode.\n");
+            use_low_res_preview = true;
+        }
+    }
 
 #ifdef __linux__
     io_expander = newIOExpander(I2C_ADDRESS, 0, -1, 0, false);
@@ -135,7 +159,7 @@ int main(int argc, char *argv[]) {
     for (int button = 0; button <= MAX_BUTTONS; button++) {
         ioe_set_mode(io_expander, pinNumberForButton(button), PIN_MODE_PU, false, false);
     }
-#endif
+#endif  // __linux__
 
     pthread_t motionThread;
     pthread_create(&motionThread, NULL, runPTZThread, NULL);
@@ -143,27 +167,27 @@ int main(int argc, char *argv[]) {
 #ifndef __linux__
     dispatch_queue_t queue = dispatch_queue_create("ndi run loop", 0);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), queue, ^{
-#endif
+#endif  // __linux__
 
         std::string ndi_path;
 
-        /* BEGIN CRAP: Everything about the code below is gross, but it's boilerplate code. */
+        // Try to look up the NDI SDK shared library.
         const char* p_NDI_runtime_folder = ::getenv("NDI_RUNTIME_DIR_V4");
         if (p_NDI_runtime_folder) {
             ndi_path = p_NDI_runtime_folder;
             ndi_path += "/libndi.dylib";
         } else {
 #ifdef __linux__
-            ndi_path = "/usr/local/NDISDK/lib/arm-rpi3-linux-gnueabihf/libndi.so.4";
-#else
+            ndi_path = NDI_LIBRARY_PATH;
+#else  // ! __linux__
             ndi_path = "libndi.4.dylib";
-#endif
+#endif  // __linux__
         }
 
-        // Try to load the library
+        // Try to load the NDI SDK shared library (boilerplate NDI SDK code).
         void *hNDILib = ::dlopen(ndi_path.c_str(), RTLD_LOCAL | RTLD_LAZY);
 
-        // The main NDI entry point for dynamic loading if we got the library
+        // Dynamically look up the shared library's initialization function (boilerplate NDI SDK code).
         const NDIlib_v3* (*NDIlib_v3_load)(void) = NULL;
         if (hNDILib) {
             *((void**)&NDIlib_v3_load) = ::dlsym(hNDILib, "NDIlib_v3_load");
@@ -174,30 +198,27 @@ int main(int argc, char *argv[]) {
             exit(0);
         }
 
-        // Lets get all of the DLL entry points
+        // Run the shared library initialization function (boilerplate NDI SDK code).
         const NDIlib_v3 *p_NDILib = NDIlib_v4_load();
 
-        // We can now run as usual
+        // Initialize the NDI library (boilerplate NDI SDK code).
         if (!p_NDILib->NDIlib_initialize())
-        {    // Cannot run NDI. Most likely because the CPU is not sufficient (see SDK documentation).
-            // you can check this directly with a call to NDIlib_is_supported_CPU()
+        {
+            // NDI is not supported- nost likely because the CPU is not sufficient (see SDK documentation).
+            // You can check this directly by calling NDIlib_is_supported_CPU().
             printf("Cannot run NDI.");
             exit(0);
         }
 
-        /* END CRAP: Everything about the code above is gross, but it's boilerplate code. */
-
-        // Catch interrupt so that we can shut down gracefully
+        // Catch SIGINT so that this tool can close NDI streams properly if the user presses control-C.
         signal(SIGINT, sigint_handler);
 
-        // We first need to look for a source on the network
+        // First, search for NDI sources on the network.
         const NDIlib_find_create_t NDI_find_create_desc = { true, NULL };
-
-        // Create a finder
         NDIlib_find_instance_t pNDI_find = p_NDILib->NDIlib_find_create_v2(&NDI_find_create_desc);
         if (!pNDI_find) exit(0);
 
-        // We wait until there is at least one source on the network
+        // Wait until at least one source is found, or one second, whichever is longer.
         uint32_t no_sources = 0;
         const NDIlib_source_t *p_sources = NULL;
         while (!exit_loop && !no_sources)
@@ -206,9 +227,12 @@ int main(int argc, char *argv[]) {
             p_sources = p_NDILib->NDIlib_find_get_current_sources(pNDI_find, &no_sources);
         }
 
-        // We need at least one source
+        // If the user pressed control-C this early, exit immediately.
         if (!p_sources) exit(0);
 
+        // If the user provided the name of a stream to display, search for it specifically.
+        // Otherwise, just show a list of valid sources and exit.  Either way, iterate
+        // through the sources.
         int source_number = -1;
         if (stream_name) {
             fprintf(stderr, "Searching for stream \"%s\"\n", stream_name);
@@ -216,15 +240,13 @@ int main(int argc, char *argv[]) {
         for (int i = 0; i < no_sources; i++) {
             if (stream_name) {
                 if (!strcmp(p_sources[i].p_ndi_name, stream_name)) {
-#if SLOW_DEBUGGING
-                    fprintf(stderr, "Chose \"%s\"\n", p_sources[i].p_ndi_name);
-#endif
+                    if (enable_debugging) {
+                        fprintf(stderr, "Chose \"%s\"\n", p_sources[i].p_ndi_name);
+                    }
                     source_number = i;
                     break;
-#if SLOW_DEBUGGING
-                } else {
+                } else if (enable_debugging) {
                     fprintf(stderr, "Not \"%s\"\n", p_sources[i].p_ndi_name);
-#endif
                 }
             } else {
                 fprintf(stderr, "    \"%s\"\n", p_sources[i].p_ndi_name);
@@ -235,11 +257,13 @@ int main(int argc, char *argv[]) {
             exit(1);
         }
 
-#ifdef USE_PREVIEW_RESOLUTION
-        NDIlib_recv_create_v3_t NDI_recv_create_desc = { p_sources[source_number], NDIlib_recv_color_format_BGRX_BGRA, NDIlib_recv_bandwidth_lowest, false, "NDIRec" };
-#else
-        NDIlib_recv_create_v3_t NDI_recv_create_desc = { p_sources[source_number], NDIlib_recv_color_format_BGRX_BGRA, NDIlib_recv_bandwidth_highest, false, "NDIRec" };
-#endif
+        NDIlib_recv_create_v3_t NDI_recv_create_desc = {
+                p_sources[source_number],
+                NDIlib_recv_color_format_BGRX_BGRA,
+                use_low_res_preview ? NDIlib_recv_bandwidth_lowest : NDIlib_recv_bandwidth_highest,
+                false,
+                "NDIRec"
+        };
 
         // Create the receiver
         NDIlib_recv_instance_t pNDI_recv = NDIlib_recv_create_v3(&NDI_recv_create_desc);
@@ -269,9 +293,9 @@ int main(int argc, char *argv[]) {
                    nullptr, 1500);
             switch(frameType) {
                 case NDIlib_frame_type_video:
-#if SLOW_DEBUGGING
-                    fprintf(stderr, "Video frame\n");
-#endif
+                    if (enable_debugging) {
+                        fprintf(stderr, "Video frame\n");
+                    }
                     if (!drawFrame(&video_recv)) {
                         // The framebuffer configuration failed.  We can't do anything.
                         exit_loop = true;
@@ -283,25 +307,26 @@ int main(int argc, char *argv[]) {
                     break;
 #ifdef ENABLE_AUDIO
                 case NDIlib_frame_type_audio:
+                    // Do something with the audio here.
                     NDIlib_recv_free_audio_v2(pNDI_recv, &audio_recv);
 #endif
                 default:
-#if SLOW_DEBUGGING
-                    fprintf(stderr, "Unknown frame type %d.\n", frameType);
-#endif
+                    if (enable_debugging) {
+                        fprintf(stderr, "Unknown frame type %d.\n", frameType);
+                    }
                     true;
             }
             if (g_ptzEnabled) {
                 sendPTZUpdates(pNDI_recv);
             } else {
-// #if SLOW_DEBUGGING
-                fprintf(stderr, "PTZ Disabled\n");
-// #endif
+                if (enable_debugging) {
+                    fprintf(stderr, "PTZ Disabled\n");
+                }
             }
         }
 
         if (pNDI_recv != nullptr) {
-            // Destroy the receiver
+            // Clean up the NDI receiver (stops packet transmission).
 
             printf("Closing the connection.\n");
             p_NDILib->NDIlib_recv_connect(pNDI_recv, NULL);
@@ -311,7 +336,7 @@ int main(int argc, char *argv[]) {
             printf("The NDI receiver has been destroyed.\n");
         }
 
-        // Not required, but nice
+        // Clean up the library as a whole.
         p_NDILib->NDIlib_destroy();
 
 #ifndef __linux__
@@ -351,35 +376,15 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
     }
 
     framebufferMemoryOffset = (unsigned long)(g_framebufferFixedConfiguration.smem_start) & (~PAGE_MASK);
-    // g_framebufferMemory = (unsigned char *)mmap(NULL, g_framebufferFixedConfiguration.smem_len + framebufferMemoryOffset, PROT_READ | PROT_WRITE, MAP_SHARED, g_framebufferFileHandle, 0);
     g_framebufferMemory = (unsigned char *)mmap(NULL, g_framebufferFixedConfiguration.smem_len + framebufferMemoryOffset, PROT_READ | PROT_WRITE, MAP_SHARED, g_framebufferFileHandle, 0);
     if ((long)g_framebufferMemory == -1L) {
         perror("cameracontroller: mmap");
         goto fail;
     }
 
-#if 0
-    // This is for doing double buffering, but RPi apparently doesn't support that (or vsync in general).
-    // move viewport to upper left corner
-    if (g_initialFramebufferConfiguration.xoffset != 0 || g_initialFramebufferConfiguration.yoffset != 0) {
-        fprintf(stderr, "Shifting framebuffer offset from (%d, %d) to (0, 0)\n", g_initialFramebufferConfiguration.xoffset, g_initialFramebufferConfiguration.yoffset);
-        g_initialFramebufferConfiguration.xoffset = 0;
-        g_initialFramebufferConfiguration.yoffset = 0;
-        if (ioctl(g_framebufferFileHandle, FBIOPAN_DISPLAY, &g_initialFramebufferConfiguration) == -1) {
-                perror("cameracontroller: FBIOPAN_DISPLAY");
-                munmap(g_framebufferMemory, g_framebufferFixedConfiguration.smem_len);
-                goto fail;
-        }
-    }
-#endif
-
     g_framebufferActiveConfiguration = g_initialFramebufferConfiguration;
     g_framebufferActiveConfiguration.xoffset = 0;
     g_framebufferActiveConfiguration.yoffset = 0;
-    // g_framebufferActiveConfiguration.xoffset = 0;
-    // g_framebufferActiveConfiguration.yoffset = g_initialFramebufferConfiguration.yres - 1;
-    // g_framebufferActiveConfiguration.xres = video_recv->xres;
-    // g_framebufferActiveConfiguration.yres = video_recv->yres;
 
     monitor_bytes_per_pixel = g_framebufferActiveConfiguration.bits_per_pixel / 8;
     g_framebufferXRes = g_framebufferActiveConfiguration.xres;
@@ -413,7 +418,7 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
     }
     return false;
 
-#else
+#else  // ! __linux__
     // Mac
     dispatch_sync(dispatch_get_main_queue(), ^{
         NSRect frame = NSMakeRect(0, 0, video_recv->xres, video_recv->yres);
@@ -433,19 +438,23 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
 
 #ifdef __linux__
     uint16_t convert_sample_to_16bpp(uint32_t sample) {
-        // AA RR GG BB
+        // Input:  0xAA RR GG BB          // 32-bit LE integer: 8 bits each for ARGB (alpha high).
+        // Output: 0brrrrr gggggg bbbbb;  // 16-bit LE integer: 5 R, 6 G, 5 B (red high).
 
-        // printf("Sample: 0x%x\n", sample);
         uint8_t r = (sample >> 16) & 0xff;
         uint8_t g = (sample >>  8) & 0xff;
         uint8_t b = (sample >>  0) & 0xff;
-        // uint8_t g = 0;
-        // uint8_t b = 0;
         return ((r >> 3) << 11) | ((g >> 2) << 5) | (g >> 3);
 
-        // return 0b1111100000010000;
-        //       ..rrrrrggggggbbbbb;
     }
+
+    // This is a really weak scaling algorithm, intended to be as fast as possible, to leave
+    // as much CPU as possible free for decoding whatever crazy resolution or profile of H.264
+    // (or worse, H.265) the camera might throw in our direction.  Experimentally, the overhead
+    // of 32-bit to 16-bit conversion plus the overhead of doing even this minimal conversion
+    // exceeds what the Raspberry Pi 4 can handle at 1080p, at least with the vc4-fkms-v3d
+    // driver enabled, so if you want to add a better scaling algorithm, it needs to be
+    // configurable.
 
     // Takes frame coordinate and returns index into framebuffer.
     uint32_t scaledRow(uint32_t y) {
@@ -462,9 +471,6 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
         static int maxPos = 0;
         if (x > g_NDIXRes) return 0;
         if (y > g_NDIYRes) return 0;
-        // uint32_t scaledX = x / g_xScaleFactor;
-        // uint32_t scaledY = y / g_yScaleFactor;
-        // return scaledX + (scaledY * g_NDIXRes);
         return (y * g_NDIXRes) + x;
     }
 
@@ -513,15 +519,6 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
         return true;
     }
 
-    static int xioctl(int fd, int request, void *arg)
-    {
-        int r;
-        do r = ioctl (fd, request, arg);
-        while (r == -1 && EINTR == errno);
-        return r;
-    }
-
-
     void cleanupFrameBuffer(void) {
         if (ioctl(g_framebufferFileHandle, FBIOPUT_VSCREENINFO, &g_initialFramebufferConfiguration) == -1) {
             fprintf(stderr, "Ioctl FBIOPUT_VSCREENINFO error.\n");
@@ -533,7 +530,7 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
         close(g_framebufferFileHandle);
     }
 
-#else
+#else  // ! __linux__
 
     BOOL CGImageWriteToFile(CGImageRef image, NSString *path) {
         CFURLRef url = (__bridge CFURLRef)[NSURL fileURLWithPath:path];
@@ -589,11 +586,11 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     }
     NDIlib_recv_ptz_zoom_speed(pNDI_recv, copyOfMotionData.zoomPosition);
     NDIlib_recv_ptz_pan_tilt_speed(pNDI_recv, copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
-#if SLOW_DEBUGGING
-    if (copyOfMotionData.xAxisPosition != 0 || copyOfMotionData.yAxisPosition != 0) {
-        fprintf(stderr, "xSpeed: %f, ySpeed; %f\n", copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
+    if (enable_debugging) {
+        if (copyOfMotionData.xAxisPosition != 0 || copyOfMotionData.yAxisPosition != 0) {
+            fprintf(stderr, "xSpeed: %f, ySpeed; %f\n", copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
+        }
     }
-#endif
     if (copyOfMotionData.retrievePositionNumber > 0 &&
         copyOfMotionData.retrievePositionNumber != lastMotionData.retrievePositionNumber) {
         fprintf(stderr, "Retrieving position %d\n", copyOfMotionData.retrievePositionNumber);
@@ -606,20 +603,43 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     lastMotionData = copyOfMotionData;
 }
 
+/*
+ * Axis (analog) read code.
+ *
+ *    On Mac:
+ *        Returns the floating-point value stored in /var/tmp/axis.%d, else zero.
+ *        All values should be floating point values in the range -1 to 1.
+ *
+ *    On Linux:
+ *        Queries a Pimoroni PIM517 I/O Expander.  The button to pin mapping is
+ *        provided by the pinNumberForButton function (currently ten greater than
+ *        the button number).
+ *
+ *        All values are converted from the range provided by that hardware into
+ *        floating point values in the range -1 to 1.
+ *
+ *    Values:
+ *        Per the NDI spec:
+ *
+ *            - For the X axis, positive values pan the camera left.
+ *            - For the Y axis, positive values tilt the camera upwards.
+ *            - For the zoom "axis", positive values (clockwise rotation,
+ *              typically) zoom the camera in (closer).
+ *
+ *        Unless you have a good reason to do otherwise, your hardware should
+ *        be built to generate positive and negative values accordingly.
+ */
 float readAxisPosition(int axis) {
-    // For X axis, left should be positive.
-    // For Y axis, up should be positive.
-    // For zoom, clockwise (zooming in) should be positive.
     #ifdef __linux__
         int pin = pinNumberForAxis(axis);
         int rawValue = input(io_expander, pin, 0.001);
         float value = rawValue / 2048.0;
 
-#if SLOW_DEBUGGING
-        fprintf(stderr, "axis %d: raw: %d scaled: %f\n", axis, rawValue, value);
-#endif
+        if (enable_debugging) {
+            fprintf(stderr, "axis %d: raw: %d scaled: %f\n", axis, rawValue, value);
+        }
         return value;
-    #else
+    #else  // ! __linux__
         char *filename;
         asprintf(&filename, "/var/tmp/axis.%d", axis);
         FILE *fp = fopen(filename, "r");
@@ -628,46 +648,62 @@ float readAxisPosition(int axis) {
         if (fp) {
             fscanf(fp, "%f\n", &value);
             fclose(fp);
-#if SLOW_DEBUGGING
-            fprintf(stderr, "Returning %f for axis %d\n", value, axis);
-#endif
+            if (enable_debugging) {
+                fprintf(stderr, "Returning %f for axis %d\n", value, axis);
+            }
             return value;
         }
-#if SLOW_DEBUGGING
+        if (enable_debugging) {
             fprintf(stderr, "Returning 0.0 (default) for axis %d\n", axis, axis);
-#endif
+        }
         return 0.0;
     #endif
 }
 
+/*
+ * Button read code.
+ *
+ *    On Mac:
+ *        Returns true if a file exists called /var/tmp/button.%d, else false.
+ *
+ *    On Linux:
+ *        Queries a Pimoroni PIM517 I/O Expander.  The button to pin mapping is
+ *        provided by the pinNumberForButton function (currently one greater than
+ *        the button number).
+ *
+ *        The code expects the switch to be open by default, and connected from
+ *        the pin to ground, i.e. pressing the button pulls the pin low.  Because
+ *        this approach takes advantage of built-in pull-down resistors, it
+ *        greatly decreases the risk of a wiring mistake causing you to draw
+ *        too much current and crashing or damaging your Raspberry Pi.
+ */
 bool readButton(int buttonNumber) {
     #ifdef __linux__
         int pin = pinNumberForButton(buttonNumber);
         int rawValue = input(io_expander, pin, 0.001);
         bool value = (rawValue == LOW);  // If logic low (grounded), return true.
 
-#if SLOW_DEBUGGING
-        fprintf(stderr, "button %d: raw: %d scaled: %s\n", buttonNumber, rawValue, value ? "true" : "false");
-#endif
+        if (enable_debugging) {
+            fprintf(stderr, "button %d: raw: %d scaled: %s\n", buttonNumber, rawValue, value ? "true" : "false");
+        }
         return value;
-    #else
-        // Return true if a file exists called /var/tmp/button.%d.
+    #else  // ! __linux__
         char *filename;
         asprintf(&filename, "/var/tmp/button.%d", buttonNumber);
         FILE *fp = fopen(filename, "r");
         free(filename);
         if (fp) {
             fclose(fp);
-#if SLOW_DEBUGGING
-            fprintf(stderr, "Returning true for button %d\n", buttonNumber);
-#endif
+            if (enable_debugging) {
+                fprintf(stderr, "Returning true for button %d\n", buttonNumber);
+            }
             return true;
         }
-#if SLOW_DEBUGGING
-        fprintf(stderr, "Returning false for button %d\n", buttonNumber);
-#endif
+        if (enable_debugging) {
+            fprintf(stderr, "Returning false for button %d\n", buttonNumber);
+        }
         return false;
-    #endif
+    #endif  // __linux__
 }
 
 #ifdef __linux__
@@ -678,17 +714,27 @@ int pinNumberForAxis(int axis) {
 int pinNumberForButton(int button) {
     return button + 1;
 }
-#endif
+#endif  // __linux__
 
-
+/*
+ * Updates the PTZ values (global variable) from a background thread.  This approach
+ * avoids any possibility of a stall while reading the values causing the video
+ * playback to malfunction (or worse).  This code uses locks to ensure that it
+ * updates the entire set of X/Y/Zoom/button values atomically.
+ */
 void updatePTZValues() {
     motionData_t newMotionData;
 
+    // Update the analog axis values.
     newMotionData.xAxisPosition = readAxisPosition(kPTZAxisX);
     newMotionData.yAxisPosition = readAxisPosition(kPTZAxisY);
     newMotionData.zoomPosition = readAxisPosition(kPTZAxisZoom);
 
+    // Determine whether the set button is down.
     bool isSetButtonDown = readButton(BUTTON_SET);
+
+    // Print a debug message when the user presses or releases the set button,
+    // but only once per transition.
     static bool showedInitialState = false;
     static bool lastSetButtonDown = false;
     if (!showedInitialState || (isSetButtonDown != lastSetButtonDown)) {
@@ -696,10 +742,26 @@ void updatePTZValues() {
         showedInitialState = true;
     }
     lastSetButtonDown = isSetButtonDown;
+
+    /*
+     * Compute the number of the position to store or retrieve.
+     *
+     * If the set button is down and the user presses a numbered button,
+     * storePositionNumber contains that button's number.
+     *
+     * If the set button is *not* down and the user presses a numbered button,
+     * retrievePositionNumber contains that button's number.
+     *
+     * Otherwise, both values are zero (0).
+     */
     newMotionData.storePositionNumber = 0;
     newMotionData.retrievePositionNumber = 0;
 
-    // Button 0 is BUTTON_SET.  Don't query its status.
+    /*
+     * NOTE: Button 0 is BUTTON_SET.  Don't query its status here, because you don't
+     * reposition the camera when the user presses that button (and because it gets
+     * queried above).
+     */
     for (int i = 1; i <= MAX_BUTTONS; i++) {
         if (readButton(i)) {
             if (isSetButtonDown) {
@@ -710,11 +772,20 @@ void updatePTZValues() {
         }
     }
 
+    /*
+     * Lock the motion data mutex and update the motion data so that the NDI code
+     * running on the main thread can send it to the camera.
+     */
     pthread_mutex_lock(&g_motionMutex);
     g_motionData = newMotionData;
     pthread_mutex_unlock(&g_motionMutex);
 }
 
+// Run this computation 200 times per second.  That's more than enough to update
+// the state every frame (and then some), and probably enough to update it for
+// every audio frame, give or take.  But by only doing this periodically, we
+// limit the amount of CPU overhead, leaving more cycles to do the actual
+// H.264 or H.265 decoding.
 void *runPTZThread(void *argIgnored) {
     while (true) {
         updatePTZValues();
