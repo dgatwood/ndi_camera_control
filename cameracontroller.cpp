@@ -48,6 +48,7 @@
 #include "ioexpander.c"
 
 int monitor_bytes_per_pixel = 4;
+bool force_slow_path = false;  // For debugging.
 
 /*
  * Controlled by the -f (--fast) flag.
@@ -481,7 +482,7 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
         if (!configureScreen(video_recv)) {
             return false;
         }
-        if (g_xScaleFactor == 1.0 && g_yScaleFactor == 1.0 && monitor_bytes_per_pixel == 4) {
+        if (g_xScaleFactor == 1.0 && g_yScaleFactor == 1.0 && monitor_bytes_per_pixel == 4 && !force_slow_path) {
             if (enable_debugging) {
                 fprintf(stderr, "fastpath\n");
             }
