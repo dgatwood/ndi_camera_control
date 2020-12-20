@@ -21,6 +21,7 @@
 
 #include <Processing.NDI.Lib.h>
 
+// #define USE_PREVIEW_RESOLUTION
 // #define SCALE_720P32_TO_1080P15_LINUX
 
 #ifdef __linux__
@@ -41,6 +42,8 @@
 #endif
 
 #include "ioexpander.c"
+
+int monitor_bytes_per_pixel = 4;
 
 #pragma mark - Constants and types
 
@@ -233,7 +236,7 @@ int main(int argc, char *argv[]) {
             exit(1);
         }
 
-#ifdef SCALE_720P32_TO_1080P15_LINUX
+#ifdef USE_PREVIEW_RESOLUTION
         NDIlib_recv_create_v3_t NDI_recv_create_desc = { p_sources[source_number], NDIlib_recv_color_format_BGRX_BGRA, NDIlib_recv_bandwidth_lowest, false, "NDIRec" };
 #else
         NDIlib_recv_create_v3_t NDI_recv_create_desc = { p_sources[source_number], NDIlib_recv_color_format_BGRX_BGRA, NDIlib_recv_bandwidth_highest, false, "NDIRec" };
@@ -379,9 +382,10 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
     // g_framebufferActiveConfiguration.xres = video_recv->xres;
     // g_framebufferActiveConfiguration.yres = video_recv->yres;
 
-#ifndef SCALE_720P32_TO_1080P15_LINUX
-    g_framebufferActiveConfiguration.bits_per_pixel = 32;
-#endif
+    monitor_bytes_per_pixel = g_framebufferActiveConfiguration.bits_per_pixel / 8;
+// #ifndef SCALE_720P32_TO_1080P15_LINUX
+    // g_framebufferActiveConfiguration.bits_per_pixel = 32;
+// #endif
     g_framebufferXRes = g_framebufferActiveConfiguration.xres;
     g_framebufferYRes = g_framebufferActiveConfiguration.yres;
     g_NDIXRes = video_recv->xres;
@@ -432,8 +436,7 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
 }
 
 #ifdef __linux__
-#ifdef SCALE_720P32_TO_1080P15_LINUX
-    uint16_t convert_sample(uint32_t sample) {
+    uint16_t convert_sample_to_16bpp(uint32_t sample) {
         // AA RR GG BB
 
         // printf("Sample: 0x%x\n", sample);
@@ -468,7 +471,6 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
         // return scaledX + (scaledY * g_NDIXRes);
         return (y * g_NDIXRes) + x;
     }
-#endif
 
     bool drawFrame(NDIlib_video_frame_v2_t *video_recv) {
         int zero = 0;
@@ -477,30 +479,40 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
         if (!configureScreen(video_recv)) {
             return false;
         }
-#ifdef SCALE_720P32_TO_1080P15_LINUX
-        uint32_t *inBuf = (uint32_t *)video_recv->p_data;
-        uint16_t *outBuf = (uint16_t *)g_framebufferBase;
-        for (int y = 0; y < video_recv->yres; y++) {
-            int minRow = scaledRow(y);
-            int maxRow = scaledRow(y+1) - 1;
-            for (int x = 0; x < video_recv->xres; x++) {
-                uint32_t *inPos = &inBuf[(y * video_recv->xres) + x];
-                for (int outX = scaledColumn(x); outX < scaledColumn(x+1); outX++) {
-                    uint16_t *outPos = &outBuf[(minRow * g_framebufferXRes) + outX];
-                    *outPos = convert_sample(*inPos);
+        if (g_xScaleFactor == 1.0 && g_yScaleFactor && monitor_bytes_per_pixel == 32) {
+            bcopy(video_recv->p_data, g_framebufferBase, (video_recv->xres * video_recv->yres * 4));
+        } else {
+            uint32_t *inBuf = (uint32_t *)video_recv->p_data;
+            uint16_t *outBuf16 = (uint16_t *)g_framebufferBase;
+            uint32_t *outBuf32 = (uint32_t *)g_framebufferBase;
+            for (int y = 0; y < video_recv->yres; y++) {
+                int minRow = scaledRow(y);
+                int maxRow = scaledRow(y+1) - 1;
+                for (int x = 0; x < video_recv->xres; x++) {
+                    uint32_t *inPos = &inBuf[(y * video_recv->xres) + x];
+                    for (int outX = scaledColumn(x); outX < scaledColumn(x+1); outX++) {
+                        if (monitor_bytes_per_pixel == 4) {
+                            uint32_t *outPos32 = &outBuf32[(minRow * g_framebufferXRes) + outX];
+                            *outPos32 = *inPos;
+                        } else {
+                            uint16_t *outPos16 = &outBuf16[(minRow * g_framebufferXRes) + outX];
+                            *outPos16 = convert_sample_to_16bpp(*inPos);
+                        }
+                    }
+                }
+                for (int row = minRow + 1; row <= maxRow; row++) {
+                    if (monitor_bytes_per_pixel == 4) {
+                        bcopy(&outBuf32[(minRow * g_framebufferXRes)],
+                              &outBuf32[(row * g_framebufferXRes)], g_framebufferXRes * 2);
+                    } else {
+                        bcopy(&outBuf16[(minRow * g_framebufferXRes)],
+                              &outBuf16[(row * g_framebufferXRes)], g_framebufferXRes * 2);
+                    }
                 }
             }
-            for (int row = minRow + 1; row <= maxRow; row++) {
-                bcopy(&outBuf[(minRow * g_framebufferXRes)],
-                      &outBuf[(row * g_framebufferXRes)], g_framebufferXRes * 2);
-            }
         }
-#else
         // memset(g_framebufferBase, 0xffffffff, (video_recv->xres * video_recv->yres * 2));
         // memset(g_framebufferBase, 0xffffffff, (video_recv->xres * video_recv->yres * 2));
-        bcopy(video_recv->p_data, g_framebufferBase, (video_recv->xres * video_recv->yres * 4));
-
-#endif
 
         return true;
     }
