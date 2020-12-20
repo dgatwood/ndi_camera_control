@@ -21,6 +21,8 @@
 
 #include <Processing.NDI.Lib.h>
 
+// #define SCALE_720P32_TO_1080P15_LINUX
+
 #ifdef __linux__
     #include <linux/kd.h>
     #include <linux/vt.h>
@@ -197,7 +199,7 @@ int main(int argc, char *argv[]) {
         uint32_t no_sources = 0;
         const NDIlib_source_t *p_sources = NULL;
         while (!exit_loop && !no_sources)
-        {    // Wait until the sources on the nwtork have changed
+        {    // Wait until the sources on the network have changed
             p_NDILib->NDIlib_find_wait_for_sources(pNDI_find, 1000);
             p_sources = p_NDILib->NDIlib_find_get_current_sources(pNDI_find, &no_sources);
         }
@@ -231,7 +233,11 @@ int main(int argc, char *argv[]) {
             exit(1);
         }
 
+#ifdef SCALE_720P32_TO_1080P15_LINUX
         NDIlib_recv_create_v3_t NDI_recv_create_desc = { p_sources[source_number], NDIlib_recv_color_format_BGRX_BGRA, NDIlib_recv_bandwidth_lowest, false, "NDIRec" };
+#else
+        NDIlib_recv_create_v3_t NDI_recv_create_desc = { p_sources[source_number], NDIlib_recv_color_format_BGRX_BGRA, NDIlib_recv_bandwidth_highest, false, "NDIRec" };
+#endif
 
         // Create the receiver
         NDIlib_recv_instance_t pNDI_recv = NDIlib_recv_create_v3(&NDI_recv_create_desc);
@@ -286,7 +292,9 @@ int main(int argc, char *argv[]) {
             if (g_ptzEnabled) {
                 sendPTZUpdates(pNDI_recv);
             } else {
+// #if SLOW_DEBUGGING
                 fprintf(stderr, "PTZ Disabled\n");
+// #endif
             }
         }
 
@@ -371,7 +379,9 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
     // g_framebufferActiveConfiguration.xres = video_recv->xres;
     // g_framebufferActiveConfiguration.yres = video_recv->yres;
 
-    // g_framebufferActiveConfiguration.bits_per_pixel = 32;
+#ifndef SCALE_720P32_TO_1080P15_LINUX
+    g_framebufferActiveConfiguration.bits_per_pixel = 32;
+#endif
     g_framebufferXRes = g_framebufferActiveConfiguration.xres;
     g_framebufferYRes = g_framebufferActiveConfiguration.yres;
     g_NDIXRes = video_recv->xres;
@@ -422,6 +432,7 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
 }
 
 #ifdef __linux__
+#ifdef SCALE_720P32_TO_1080P15_LINUX
     uint16_t convert_sample(uint32_t sample) {
         // AA RR GG BB
 
@@ -457,6 +468,7 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
         // return scaledX + (scaledY * g_NDIXRes);
         return (y * g_NDIXRes) + x;
     }
+#endif
 
     bool drawFrame(NDIlib_video_frame_v2_t *video_recv) {
         int zero = 0;
@@ -465,10 +477,7 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
         if (!configureScreen(video_recv)) {
             return false;
         }
-        // memset(g_framebufferBase, 0xffffffff, (video_recv->xres * video_recv->yres * 2));
-        // memset(g_framebufferBase, 0xffffffff, (video_recv->xres * video_recv->yres * 2));
-
-        //bcopy(video_recv->p_data, g_framebufferBase, (video_recv->xres * video_recv->yres * 2));
+#ifdef SCALE_720P32_TO_1080P15_LINUX
         uint32_t *inBuf = (uint32_t *)video_recv->p_data;
         uint16_t *outBuf = (uint16_t *)g_framebufferBase;
         for (int y = 0; y < video_recv->yres; y++) {
@@ -486,6 +495,12 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
                       &outBuf[(row * g_framebufferXRes)], g_framebufferXRes * 2);
             }
         }
+#else
+        // memset(g_framebufferBase, 0xffffffff, (video_recv->xres * video_recv->yres * 2));
+        // memset(g_framebufferBase, 0xffffffff, (video_recv->xres * video_recv->yres * 2));
+        bcopy(video_recv->p_data, g_framebufferBase, (video_recv->xres * video_recv->yres * 4));
+
+#endif
 
         return true;
     }
