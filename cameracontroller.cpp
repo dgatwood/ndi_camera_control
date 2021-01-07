@@ -21,6 +21,8 @@
 
 #include <Processing.NDI.Lib.h>
 
+// #define DEMO_MODE
+
 // This must be set correctly in Linux, because the NDI library is bizarre.
 #define NDI_LIBRARY_PATH "/usr/local/NDISDK/lib/arm-rpi3-linux-gnueabihf/libndi.so.4"
 
@@ -60,6 +62,8 @@ bool use_low_res_preview = false;
 
 /* Enable debugging (controlled by the -d / --debug flag). */
 bool enable_debugging = false;
+/* Enable debugging (controlled by the -v / --verbose flag). */
+bool enable_verbose_debugging = false;
 
 #pragma mark - Constants and types
 
@@ -128,6 +132,10 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv);
 bool drawFrame(NDIlib_video_frame_v2_t *video_recv);
 void *runPTZThread(void *argIgnored);
 void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv);
+void setMotionData(motionData_t newMotionData);
+#ifdef DEMO_MODE
+void demoPTZValues(void);
+#endif
 
 #ifdef __linux__
 int pinNumberForAxis(int axis);
@@ -135,15 +143,20 @@ int pinNumberForButton(int button);
 #endif  // __linux__
 
 int main(int argc, char *argv[]) {
+    char *stream_name = argv[argc - 1];
     if (argc < 2) {
         fprintf(stderr, "Usage: camera_control \"stream name\"\n");
         fprintf(stderr, "Known sources:\n");
+        stream_name = NULL;
     }
-    char *stream_name = argv[argc - 1];
     for (int i = 1; i < argc - 1; i++) {
         if (!strcmp(argv[i], "-d") || !strcmp(argv[i], "--debug")) {
             fprintf(stderr, "Enabling debugging (slow).\n");
             enable_debugging = true;
+        }
+        if (!strcmp(argv[i], "-v") || !strcmp(argv[i], "--verbose")) {
+            fprintf(stderr, "Enabling verbose debugging (slow).\n");
+            enable_verbose_debugging = true;
         }
         if (!strcmp(argv[i], "-f") || !strcmp(argv[i], "--fast")) {
             fprintf(stderr, "Using low-res mode.\n");
@@ -152,14 +165,18 @@ int main(int argc, char *argv[]) {
     }
 
 #ifdef __linux__
+#ifndef DEMO_MODE
     io_expander = newIOExpander(I2C_ADDRESS, 0, -1, 0, false);
-    for (int pin = 0; pin < 2; pin++) {
-        ioe_set_mode(io_expander, pinNumberForAxis(pin), PIN_MODE_ADC, false, false);
+    if (io_expander) {
+        for (int pin = 0; pin < 2; pin++) {
+            ioe_set_mode(io_expander, pinNumberForAxis(pin), PIN_MODE_ADC, false, false);
+        }
+        // Button 0 is BUTTON_SET.  Configure it like the other buttons.
+        for (int button = 0; button <= MAX_BUTTONS; button++) {
+            ioe_set_mode(io_expander, pinNumberForButton(button), PIN_MODE_PU, false, false);
+        }
     }
-    // Button 0 is BUTTON_SET.  Configure it like the other buttons.
-    for (int button = 0; button <= MAX_BUTTONS; button++) {
-        ioe_set_mode(io_expander, pinNumberForButton(button), PIN_MODE_PU, false, false);
-    }
+#endif
 #endif  // __linux__
 
     pthread_t motionThread;
@@ -224,7 +241,7 @@ int main(int argc, char *argv[]) {
         const NDIlib_source_t *p_sources = NULL;
         while (!exit_loop && !no_sources)
         {    // Wait until the sources on the network have changed
-            p_NDILib->NDIlib_find_wait_for_sources(pNDI_find, 1000);
+            p_NDILib->NDIlib_find_wait_for_sources(pNDI_find, 10000);
             p_sources = p_NDILib->NDIlib_find_get_current_sources(pNDI_find, &no_sources);
         }
 
@@ -512,10 +529,10 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
                 for (int row = minRow + 1; row <= maxRow; row++) {
                     if (monitor_bytes_per_pixel == 4) {
                         bcopy(&outBuf32[(minRow * g_framebufferXRes)],
-                              &outBuf32[(row * g_framebufferXRes)], g_framebufferXRes * 2);
+                              &outBuf32[(row * g_framebufferXRes)], g_framebufferXRes * monitor_bytes_per_pixel);
                     } else {
                         bcopy(&outBuf16[(minRow * g_framebufferXRes)],
-                              &outBuf16[(row * g_framebufferXRes)], g_framebufferXRes * 2);
+                              &outBuf16[(row * g_framebufferXRes)], g_framebufferXRes * monitor_bytes_per_pixel);
                     }
                 }
             }
@@ -593,7 +610,7 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     }
     NDIlib_recv_ptz_zoom_speed(pNDI_recv, copyOfMotionData.zoomPosition);
     NDIlib_recv_ptz_pan_tilt_speed(pNDI_recv, copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
-    if (enable_debugging) {
+    if (enable_verbose_debugging) {
         if (copyOfMotionData.xAxisPosition != 0 || copyOfMotionData.yAxisPosition != 0) {
             fprintf(stderr, "xSpeed: %f, ySpeed; %f\n", copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
         }
@@ -610,6 +627,7 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     lastMotionData = copyOfMotionData;
 }
 
+#ifndef DEMO_MODE
 /*
  * Axis (analog) read code.
  *
@@ -642,7 +660,7 @@ float readAxisPosition(int axis) {
         int rawValue = input(io_expander, pin, 0.001);
         float value = rawValue / 2048.0;
 
-        if (enable_debugging) {
+        if (enable_verbose_debugging) {
             fprintf(stderr, "axis %d: raw: %d scaled: %f\n", axis, rawValue, value);
         }
         return value;
@@ -655,12 +673,12 @@ float readAxisPosition(int axis) {
         if (fp) {
             fscanf(fp, "%f\n", &value);
             fclose(fp);
-            if (enable_debugging) {
+            if (enable_verbose_debugging) {
                 fprintf(stderr, "Returning %f for axis %d\n", value, axis);
             }
             return value;
         }
-        if (enable_debugging) {
+        if (enable_verbose_debugging) {
             fprintf(stderr, "Returning 0.0 (default) for axis %d\n", axis, axis);
         }
         return 0.0;
@@ -690,7 +708,7 @@ bool readButton(int buttonNumber) {
         int rawValue = input(io_expander, pin, 0.001);
         bool value = (rawValue == LOW);  // If logic low (grounded), return true.
 
-        if (enable_debugging) {
+        if (enable_verbose_debugging) {
             fprintf(stderr, "button %d: raw: %d scaled: %s\n", buttonNumber, rawValue, value ? "true" : "false");
         }
         return value;
@@ -701,12 +719,12 @@ bool readButton(int buttonNumber) {
         free(filename);
         if (fp) {
             fclose(fp);
-            if (enable_debugging) {
+            if (enable_verbose_debugging) {
                 fprintf(stderr, "Returning true for button %d\n", buttonNumber);
             }
             return true;
         }
-        if (enable_debugging) {
+        if (enable_verbose_debugging) {
             fprintf(stderr, "Returning false for button %d\n", buttonNumber);
         }
         return false;
@@ -779,6 +797,11 @@ void updatePTZValues() {
         }
     }
 
+    setMotionData(newMotionData);
+}
+#endif
+
+void setMotionData(motionData_t newMotionData) {
     /*
      * Lock the motion data mutex and update the motion data so that the NDI code
      * running on the main thread can send it to the camera.
@@ -795,7 +818,47 @@ void updatePTZValues() {
 // H.264 or H.265 decoding.
 void *runPTZThread(void *argIgnored) {
     while (true) {
+#ifdef DEMO_MODE
+        demoPTZValues();
+#else
         updatePTZValues();
         usleep(5000);
+#endif
     }
 }
+
+#ifdef DEMO_MODE
+void demoPTZValues(void) {
+    motionData_t motionData;
+    bzero(&motionData, sizeof(motionData));
+
+    // Move the camera for one second at a time.
+    motionData.xAxisPosition = 1.0; setMotionData(motionData); usleep(1000000);
+    motionData.xAxisPosition = 0.0; setMotionData(motionData); usleep(1000000);
+    motionData.yAxisPosition = 1.0; setMotionData(motionData); usleep(1000000);
+    motionData.yAxisPosition = 0.0; setMotionData(motionData); usleep(1000000);
+    motionData.zoomPosition = 1.0; setMotionData(motionData); usleep(1000000);
+    motionData.zoomPosition = 0.0; setMotionData(motionData); usleep(1000000);
+
+    // Store in position 1.
+    motionData.storePositionNumber = 1; setMotionData(motionData); usleep(1000000);
+    motionData.storePositionNumber = 0; setMotionData(motionData); usleep(1000000);
+
+    motionData.xAxisPosition = -1.0; setMotionData(motionData); usleep(1000000);
+    motionData.xAxisPosition = 0.0; setMotionData(motionData); usleep(1000000);
+    motionData.yAxisPosition = -1.0; setMotionData(motionData); usleep(1000000);
+    motionData.yAxisPosition = 0.0; setMotionData(motionData); usleep(1000000);
+    motionData.zoomPosition = -1.0; setMotionData(motionData); usleep(1000000);
+    motionData.zoomPosition = 0.0; setMotionData(motionData); usleep(1000000);
+
+    // Store in position 2.
+    motionData.storePositionNumber = 2; setMotionData(motionData); usleep(1000000);
+    motionData.storePositionNumber = 0; setMotionData(motionData); usleep(1000000);
+
+    motionData.retrievePositionNumber = 1; setMotionData(motionData); usleep(1000000);
+    motionData.storePositionNumber = 0; setMotionData(motionData); usleep(1000000);
+
+    motionData.retrievePositionNumber = 2; setMotionData(motionData); usleep(1000000);
+    motionData.storePositionNumber = 0; setMotionData(motionData); usleep(1000000);
+}
+#endif
