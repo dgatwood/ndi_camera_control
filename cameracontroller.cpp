@@ -119,7 +119,7 @@ enum {
 #endif  // __linux__
 
 bool g_ptzEnabled = false;
-pthread_mutex_t g_motionMutex = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER_NP;
+pthread_mutex_t g_motionMutex = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER;
 
 motionData_t g_motionData;
 
@@ -133,6 +133,11 @@ bool drawFrame(NDIlib_video_frame_v2_t *video_recv);
 void *runPTZThread(void *argIgnored);
 void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv);
 void setMotionData(motionData_t newMotionData);
+uint32_t find_named_source(const NDIlib_source_t *p_sources,
+                           uint32_t no_sources,
+                           char *stream_name,
+                           bool use_fallback);
+
 #ifdef DEMO_MODE
 void demoPTZValues(void);
 #endif
@@ -255,20 +260,9 @@ int main(int argc, char *argv[]) {
         if (stream_name) {
             fprintf(stderr, "Searching for stream \"%s\"\n", stream_name);
         }
-        for (int i = 0; i < no_sources; i++) {
-            if (stream_name) {
-                if (!strcmp(p_sources[i].p_ndi_name, stream_name)) {
-                    if (enable_debugging) {
-                        fprintf(stderr, "Chose \"%s\"\n", p_sources[i].p_ndi_name);
-                    }
-                    source_number = i;
-                    break;
-                } else if (enable_debugging) {
-                    fprintf(stderr, "Not \"%s\"\n", p_sources[i].p_ndi_name);
-                }
-            } else {
-                fprintf(stderr, "    \"%s\"\n", p_sources[i].p_ndi_name);
-            }
+        source_number = find_named_source(p_sources, no_sources, stream_name, false);
+        if (stream_name != NULL && source_number == -1) {
+            source_number = find_named_source(p_sources, no_sources, stream_name, true);
         }
         if (source_number == -1) {
             printf("Could not find source.\n");
@@ -332,7 +326,6 @@ int main(int argc, char *argv[]) {
                     if (enable_debugging) {
                         fprintf(stderr, "Unknown frame type %d.\n", frameType);
                     }
-                    true;
             }
             if (g_ptzEnabled) {
                 sendPTZUpdates(pNDI_recv);
@@ -365,6 +358,50 @@ int main(int argc, char *argv[]) {
     NSApplicationLoad();
     CFRunLoopRun();
 #endif
+}
+
+void truncate_name_before_ip(char *name) {
+    for (char *pos = &name[strlen(name) - 1] ; pos >= name; pos--) {
+        if (*pos == ',') {
+            *pos = '\0';
+            break;
+        }
+    }
+}
+
+bool source_name_compare(const char *name1, const char *name2, bool use_fallback) {
+    if (!use_fallback) {
+        return !strcmp(name1, name2);
+    }
+
+    char *truncname1 = NULL, *truncname2 = NULL;
+    asprintf(&truncname1, "%s", name1);
+    asprintf(&truncname2, "%s", name2);
+    truncate_name_before_ip(truncname1);
+    truncate_name_before_ip(truncname2);
+
+    return !strcmp(truncname1, truncname2);
+}
+
+uint32_t find_named_source(const NDIlib_source_t *p_sources,
+                           uint32_t no_sources,
+                           char *stream_name,
+                           bool use_fallback) {
+    for (int i = 0; i < no_sources; i++) {
+        if (stream_name) {
+            if (source_name_compare(p_sources[i].p_ndi_name, stream_name, use_fallback)) {
+                if (enable_debugging) {
+                    fprintf(stderr, "Chose \"%s\"\n", p_sources[i].p_ndi_name);
+                }
+                return i;
+            } else if (enable_debugging) {
+                fprintf(stderr, "Not \"%s\"\n", p_sources[i].p_ndi_name);
+            }
+        } else {
+            fprintf(stderr, "    \"%s\"\n", p_sources[i].p_ndi_name);
+        }
+    }
+    return -1;
 }
 
 bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
@@ -679,7 +716,7 @@ float readAxisPosition(int axis) {
             return value;
         }
         if (enable_verbose_debugging) {
-            fprintf(stderr, "Returning 0.0 (default) for axis %d\n", axis, axis);
+            fprintf(stderr, "Returning 0.0 (default) for axis %d\n", axis);
         }
         return 0.0;
     #endif
