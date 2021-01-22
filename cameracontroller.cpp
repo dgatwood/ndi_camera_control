@@ -235,6 +235,7 @@ int main(int argc, char *argv[]) {
 
         // Catch SIGINT so that this tool can close NDI streams properly if the user presses control-C.
         signal(SIGINT, sigint_handler);
+        signal(SIGTERM, sigint_handler);
 
         // First, search for NDI sources on the network.
         const NDIlib_find_create_t NDI_find_create_desc = { true, NULL };
