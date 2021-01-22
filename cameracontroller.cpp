@@ -119,7 +119,11 @@ enum {
 #endif  // __linux__
 
 bool g_ptzEnabled = false;
+#if __linux__
+pthread_mutex_t g_motionMutex = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER_NP;
+#else
 pthread_mutex_t g_motionMutex = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER;
+#endif
 
 motionData_t g_motionData;
 
