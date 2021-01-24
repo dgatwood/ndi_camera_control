@@ -700,8 +700,18 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
 float readAxisPosition(int axis) {
     #ifdef __linux__
         int pin = pinNumberForAxis(axis);
-        int rawValue = input(io_expander, pin, 0.001);
-        float value = (rawValue - 2048) / 2048.0;
+        int rawValue = input(io_expander, pin, 0.001) - 2048;
+        if (axis == kPTZAxisZoom && abs(rawValue) < 100) {
+            rawValue = 0;  // Minimum motion threshold.
+        } else if (abs(rawValue) < 10) {
+            rawValue = 0;  // Minimum motion threshold.
+        }
+        float value = rawValue / 2048.0;
+        if (value < 0) {
+            value = value * -value;  // Logarithmic curve.
+        } else {
+            value = value * value;  // Logarithmic curve.
+        }
 
         if (enable_verbose_debugging) {
             fprintf(stderr, "axis %d: raw: %d scaled: %f\n", axis, rawValue, value);
