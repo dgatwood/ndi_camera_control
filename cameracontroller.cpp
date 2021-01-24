@@ -177,11 +177,11 @@ int main(int argc, char *argv[]) {
 #ifndef DEMO_MODE
     io_expander = newIOExpander(I2C_ADDRESS, 0, -1, 0, false);
     if (io_expander) {
-        for (int pin = 0; pin < 2; pin++) {
+        for (int pin = kPTZAxisX; pin <= kPTZAxisZoom; pin++) {
             ioe_set_mode(io_expander, pinNumberForAxis(pin), PIN_MODE_ADC, false, false);
         }
         // Button 0 is BUTTON_SET.  Configure it like the other buttons.
-        for (int button = 0; button <= MAX_BUTTONS; button++) {
+        for (int button = BUTTON_SET; button <= MAX_BUTTONS; button++) {
             ioe_set_mode(io_expander, pinNumberForButton(button), PIN_MODE_PU, false, false);
         }
     }
@@ -385,6 +385,7 @@ bool source_name_compare(const char *name1, const char *name2, bool use_fallback
     truncate_name_before_ip(truncname1);
     truncate_name_before_ip(truncname2);
 
+fprintf(stderr, "CMP \"%s\" ?= \"%s\"\n", truncname1, truncname2);
     return !strcmp(truncname1, truncname2);
 }
 
@@ -647,10 +648,10 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     // the value that we send to the rest of the app.
     static motionData_t lastMotionData = { 0.0, 0.0, 0.0, 0, 0 };
 
-    if (copyOfMotionData.zoomPosition != 0) {
+    if (enable_verbose_debugging && copyOfMotionData.zoomPosition != 0) {
         fprintf(stderr, "zSpeed: %f\n", copyOfMotionData.zoomPosition);
     }
-    NDIlib_recv_ptz_zoom_speed(pNDI_recv, copyOfMotionData.zoomPosition);
+    NDIlib_recv_ptz_zoom_speed(pNDI_recv, -copyOfMotionData.zoomPosition);
     NDIlib_recv_ptz_pan_tilt_speed(pNDI_recv, copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
     if (enable_verbose_debugging) {
         if (copyOfMotionData.xAxisPosition != 0 || copyOfMotionData.yAxisPosition != 0) {
@@ -700,7 +701,7 @@ float readAxisPosition(int axis) {
     #ifdef __linux__
         int pin = pinNumberForAxis(axis);
         int rawValue = input(io_expander, pin, 0.001);
-        float value = rawValue / 2048.0;
+        float value = (rawValue - 2048) / 2048.0;
 
         if (enable_verbose_debugging) {
             fprintf(stderr, "axis %d: raw: %d scaled: %f\n", axis, rawValue, value);
@@ -791,6 +792,23 @@ int pinNumberForButton(int button) {
  */
 void updatePTZValues() {
     motionData_t newMotionData;
+
+#ifdef DEBUG_HACK
+    int readValues[16];
+
+    for (int i = 1; i <= 14; i++) {
+        int rawValue = input(io_expander, i, 0.001);
+        readValues[i] = rawValue - 2048;
+    }
+
+    fprintf(stderr, "    1     2     3     4     5     6     7     8     9    10    11    12    13    14\n");
+    fprintf(stderr, "%5d %5d %5d %5d %5d %5d %5d %5d %5d %5d %5d %5d %5d %5d\n",
+        readValues[1], readValues[2], readValues[3], readValues[4], readValues[5],
+        readValues[6], readValues[7], readValues[8], readValues[9], readValues[10], readValues[11],
+        readValues[12], readValues[13], readValues[14]);
+
+    return;
+#endif
 
     // Update the analog axis values.
     newMotionData.xAxisPosition = readAxisPosition(kPTZAxisX);
