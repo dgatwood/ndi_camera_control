@@ -249,26 +249,27 @@ int main(int argc, char *argv[]) {
         // Wait until at least one source is found, or one second, whichever is longer.
         uint32_t no_sources = 0;
         const NDIlib_source_t *p_sources = NULL;
-        while (!exit_loop && !no_sources)
-        {    // Wait until the sources on the network have changed
-            p_NDILib->NDIlib_find_wait_for_sources(pNDI_find, 10000);
+        int source_number = -1;
+        while (!exit_loop && source_number == -1) {
+            // Wait until the sources on the network have changed
+            p_NDILib->NDIlib_find_wait_for_sources(pNDI_find, 1000000);
             p_sources = p_NDILib->NDIlib_find_get_current_sources(pNDI_find, &no_sources);
+
+            // If the user provided the name of a stream to display, search for it specifically.
+            // Otherwise, just show a list of valid sources and exit.  Either way, iterate
+            // through the sources.
+            if (stream_name) {
+                fprintf(stderr, "Searching for stream \"%s\"\n", stream_name);
+            }
+            source_number = find_named_source(p_sources, no_sources, stream_name, false);
+            if (stream_name != NULL && source_number == -1) {
+                source_number = find_named_source(p_sources, no_sources, stream_name, true);
+            }
         }
 
         // If the user pressed control-C this early, exit immediately.
         if (!p_sources) exit(0);
 
-        // If the user provided the name of a stream to display, search for it specifically.
-        // Otherwise, just show a list of valid sources and exit.  Either way, iterate
-        // through the sources.
-        int source_number = -1;
-        if (stream_name) {
-            fprintf(stderr, "Searching for stream \"%s\"\n", stream_name);
-        }
-        source_number = find_named_source(p_sources, no_sources, stream_name, false);
-        if (stream_name != NULL && source_number == -1) {
-            source_number = find_named_source(p_sources, no_sources, stream_name, true);
-        }
         if (source_number == -1) {
             printf("Could not find source.\n");
             exit(1);
@@ -891,7 +892,9 @@ void *runPTZThread(void *argIgnored) {
 #ifdef DEMO_MODE
         demoPTZValues();
 #else
-        updatePTZValues();
+        if (io_expander != NULL) {
+            updatePTZValues();
+        }
         usleep(5000);
 #endif
     }
