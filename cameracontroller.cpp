@@ -700,6 +700,7 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
  */
 float readAxisPosition(int axis) {
     #ifdef __linux__
+	if (!io_expander) return 0;
         int pin = pinNumberForAxis(axis);
         int rawValue = input(io_expander, pin, 0.001) - 2048;
         if (axis == kPTZAxisZoom && abs(rawValue) < 100) {
@@ -758,6 +759,7 @@ float readAxisPosition(int axis) {
  */
 bool readButton(int buttonNumber) {
     #ifdef __linux__
+	if (!io_expander) return 0;
         int pin = pinNumberForButton(buttonNumber);
         int rawValue = input(io_expander, pin, 0.001);
         bool value = (rawValue == LOW);  // If logic low (grounded), return true.
