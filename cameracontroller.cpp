@@ -894,7 +894,9 @@ void *runPTZThread(void *argIgnored) {
 #ifdef DEMO_MODE
         demoPTZValues();
 #else
-        updatePTZValues();
+        if (io_expander != NULL) {
+            updatePTZValues();
+        }
         usleep(5000);
 #endif
     }
