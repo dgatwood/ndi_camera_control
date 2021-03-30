@@ -8,6 +8,9 @@ MACLDFLAGS=-L/usr/local/NDISDK/lib/x64/ -L/usr/local/NDISDK/lib/arm-rpi3-linux-g
 CXXFLAGS=${LINUXCXXFLAGS}
 LDFLAGS=${LINUXLDFLAGS}
 
+# CXXFLAGS=${MACCXXFLAGS}
+# LDFLAGS=${MACLDFLAGS}
+
 cameracontroller: cameracontroller.cpp
 
 libmpv:
