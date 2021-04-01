@@ -21,6 +21,14 @@
 
 #include <Processing.NDI.Lib.h>
 
+#define INCLUDE_VISCA
+
+#ifdef INCLUDE_VISCA
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#endif
+
 // #define DEMO_MODE
 
 // This must be set correctly in Linux, because the NDI library is bizarre.
@@ -62,8 +70,14 @@ bool use_low_res_preview = false;
 
 /* Enable debugging (controlled by the -d / --debug flag). */
 bool enable_debugging = false;
+
 /* Enable debugging (controlled by the -v / --verbose flag). */
 bool enable_verbose_debugging = false;
+
+/* Enable VISCA-over-IP camera control. */
+#ifdef INCLUDE_VISCA
+bool enable_visca = false;
+#endif
 
 #pragma mark - Constants and types
 
@@ -119,6 +133,11 @@ enum {
 #endif  // __linux__
 
 bool g_ptzEnabled = false;
+
+#ifdef INCLUDE_VISCA
+int g_visca_sock;
+#endif
+
 #if __linux__
 pthread_mutex_t g_motionMutex = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER_NP;
 #else
@@ -142,6 +161,10 @@ uint32_t find_named_source(const NDIlib_source_t *p_sources,
                            char *stream_name,
                            bool use_fallback);
 
+#ifdef INCLUDE_VISCA
+bool connectVISCA(char *ip);
+#endif
+
 #ifdef DEMO_MODE
 void demoPTZValues(void);
 #endif
@@ -152,6 +175,9 @@ int pinNumberForButton(int button);
 #endif  // __linux__
 
 int main(int argc, char *argv[]) {
+#ifdef INCLUDE_VISCA
+    char *visca_ip = NULL;
+#endif
     char *stream_name = argv[argc - 1];
     if (argc < 2) {
         fprintf(stderr, "Usage: camera_control \"stream name\"\n");
@@ -171,7 +197,23 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Using low-res mode.\n");
             use_low_res_preview = true;
         }
+#ifdef INCLUDE_VISCA
+        if (!strcmp(argv[i], "-V") || !strcmp(argv[i], "--enable_visca")) {
+            fprintf(stderr, "Enabling VISCA-over-IP control.\n");
+            if (argc > i + 1) {
+              enable_visca = true;
+              visca_ip = argv[i+1];
+              i++;
+            }
+        }
+#endif
     }
+
+#ifdef INCLUDE_VISCA
+    if (enable_visca) {
+        enable_visca = connectVISCA(visca_ip);
+    }
+#endif
 
 #ifdef __linux__
 #ifndef DEMO_MODE
@@ -333,7 +375,11 @@ int main(int argc, char *argv[]) {
                         fprintf(stderr, "Unknown frame type %d.\n", frameType);
                     }
             }
-            if (g_ptzEnabled) {
+            if (g_ptzEnabled
+#ifdef INCLUDE_VISCA
+                || enable_visca
+#endif
+               ) {
                 sendPTZUpdates(pNDI_recv);
             } else {
                 if (enable_debugging) {
@@ -639,6 +685,47 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
 
 #endif
 
+#ifdef INCLUDE_VISCA
+bool connectVISCA(char *ip) {
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+
+    inet_pton(AF_INET, ip, &(sa.sin_addr));
+    sa.sin_port = htons(5678); // 52381
+    sa.sin_family = AF_INET;
+
+    g_visca_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (g_visca_sock == -1) {
+        perror("Socket could not be created.");
+        return false;
+    }
+    if (connect(g_visca_sock, (struct sockaddr *) &sa, sizeof(sa)) == -1) {
+        perror("Connect failed.");
+        close(g_visca_sock);
+        return false;
+    }
+    return true;
+}
+#endif
+
+#ifdef INCLUDE_VISCA
+void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
+    uint8_t buf[6] = { 0x81, 0x01, 0x04, 0x07, 0x00, 0xFF };
+    int level = (int)(motionData->zoomPosition * 7.9);
+
+    if (level < 0) {  // Zoom in
+        buf[4] = 0x20 | (-level);
+    } else if (level > 0) {
+        buf[4] = 0x30 | level;
+    }
+
+    write(g_visca_sock, buf, 6);
+
+    char ack[3];
+    read(g_visca_sock, ack, 3);
+}
+#endif
+
 void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     pthread_mutex_lock(&g_motionMutex);
     motionData_t copyOfMotionData = g_motionData;
@@ -652,7 +739,14 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     if (enable_verbose_debugging && copyOfMotionData.zoomPosition != 0) {
         fprintf(stderr, "zSpeed: %f\n", copyOfMotionData.zoomPosition);
     }
-    NDIlib_recv_ptz_zoom_speed(pNDI_recv, -copyOfMotionData.zoomPosition);
+
+#ifdef INCLUDE_VISCA
+    if (!enable_visca) {
+#endif
+        NDIlib_recv_ptz_zoom_speed(pNDI_recv, -copyOfMotionData.zoomPosition);
+#ifdef INCLUDE_VISCA
+    }
+#endif
     NDIlib_recv_ptz_pan_tilt_speed(pNDI_recv, copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
     if (enable_verbose_debugging) {
         if (copyOfMotionData.xAxisPosition != 0 || copyOfMotionData.yAxisPosition != 0) {
@@ -871,6 +965,9 @@ void updatePTZValues() {
     }
 
     setMotionData(newMotionData);
+#ifdef INCLUDE_VISCA
+    sendPTZUpdatesOverVISCA(&newMotionData);
+#endif
 }
 #endif
 
@@ -894,9 +991,13 @@ void *runPTZThread(void *argIgnored) {
 #ifdef DEMO_MODE
         demoPTZValues();
 #else
+#ifdef __linux__
         if (io_expander != NULL) {
+#endif
             updatePTZValues();
+#ifdef __linux__
         }
+#endif
         usleep(5000);
 #endif
     }
