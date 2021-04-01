@@ -135,7 +135,7 @@ enum {
 bool g_ptzEnabled = false;
 
 #ifdef INCLUDE_VISCA
-int g_visca_sock;
+int g_visca_sock = -1;
 #endif
 
 #if __linux__
@@ -719,6 +719,9 @@ void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
         buf[4] = 0x30 | level;
     }
 
+    if (g_visca_sock == -1) {
+        return;
+    }
     write(g_visca_sock, buf, 6);
 
     char ack[3];
@@ -966,7 +969,9 @@ void updatePTZValues() {
 
     setMotionData(newMotionData);
 #ifdef INCLUDE_VISCA
-    sendPTZUpdatesOverVISCA(&newMotionData);
+    if (enable_visca) {
+        sendPTZUpdatesOverVISCA(&newMotionData);
+    }
 #endif
 }
 #endif
