@@ -6,6 +6,7 @@
 #include <string>
 #include <thread>
 
+#include <dns_sd.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -22,6 +23,7 @@
 #include <Processing.NDI.Lib.h>
 
 #define INCLUDE_VISCA
+// #define VISCA_UDP
 
 #ifdef INCLUDE_VISCA
 #include <arpa/inet.h>
@@ -146,6 +148,8 @@ pthread_mutex_t g_motionMutex = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER;
 
 motionData_t g_motionData;
 
+DNSServiceRef g_browseRef = NULL, g_resolveRef = NULL, g_lookupRef = NULL;
+
 static std::atomic<bool> exit_loop(false);
 static void sigint_handler(int)
 {    exit_loop = true;
@@ -162,7 +166,7 @@ uint32_t find_named_source(const NDIlib_source_t *p_sources,
                            bool use_fallback);
 
 #ifdef INCLUDE_VISCA
-bool connectVISCA(char *ip);
+bool connectVISCA(char *stream_name);
 #endif
 
 #ifdef DEMO_MODE
@@ -175,9 +179,6 @@ int pinNumberForButton(int button);
 #endif  // __linux__
 
 int main(int argc, char *argv[]) {
-#ifdef INCLUDE_VISCA
-    char *visca_ip = NULL;
-#endif
     char *stream_name = argv[argc - 1];
     if (argc < 2) {
         fprintf(stderr, "Usage: camera_control \"stream name\"\n");
@@ -202,7 +203,6 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Enabling VISCA-over-IP control.\n");
             if (argc > i + 1) {
               enable_visca = true;
-              visca_ip = argv[i+1];
               i++;
             }
         }
@@ -211,7 +211,7 @@ int main(int argc, char *argv[]) {
 
 #ifdef INCLUDE_VISCA
     if (enable_visca) {
-        enable_visca = connectVISCA(visca_ip);
+        enable_visca = connectVISCA(stream_name);
     }
 #endif
 
@@ -380,6 +380,15 @@ int main(int argc, char *argv[]) {
                 || enable_visca
 #endif
                ) {
+                if (g_browseRef != NULL) {
+                    DNSServiceProcessResult(g_browseRef);
+                }
+                if (g_resolveRef != NULL) {
+                    DNSServiceProcessResult(g_resolveRef);
+                }
+                if (g_lookupRef != NULL) {
+                    DNSServiceProcessResult(g_lookupRef);
+                }
                 sendPTZUpdates(pNDI_recv);
             } else {
                 if (enable_debugging) {
@@ -686,25 +695,187 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
 #endif
 
 #ifdef INCLUDE_VISCA
-bool connectVISCA(char *ip) {
-    struct sockaddr_in sa;
-    memset(&sa, 0, sizeof(sa));
+void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
+                                 DNSServiceFlags flags,
+                                 uint32_t interfaceIndex,
+                                 DNSServiceErrorType errorCode,
+                                 const char *serviceName,
+                                 const char *regtype,
+                                 const char *replyDomain,
+                                 void *context);
 
-    inet_pton(AF_INET, ip, &(sa.sin_addr));
-    sa.sin_port = htons(5678); // 52381
-    sa.sin_family = AF_INET;
-
-    g_visca_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (g_visca_sock == -1) {
-        perror("Socket could not be created.");
+bool connectVISCA(char *stream_name) {
+    if (g_browseRef != NULL) {
+        DNSServiceRefDeallocate(g_browseRef);
+        g_browseRef = NULL;
+    }
+    // Start browsing for the service.
+    fprintf(stderr, "Starting browser.\n");
+    DNSServiceErrorType errorCode =
+        DNSServiceBrowse(&g_browseRef, 0, 0,
+                         "_ndi._tcp",
+                         NULL,
+                         &handleDNSServiceBrowseReply,
+                         (void *)stream_name);
+    if (errorCode != kDNSServiceErr_NoError) {
+        fprintf(stderr, "Could not start service browser for VISCA (error %d)\n", errorCode);
         return false;
     }
-    if (connect(g_visca_sock, (struct sockaddr *) &sa, sizeof(sa)) == -1) {
-        perror("Connect failed.");
-        close(g_visca_sock);
-        return false;
-    }
+    fprintf(stderr, "Started.\n");
     return true;
+}
+
+void handleDNSServiceResolveReply(DNSServiceRef sdRef,
+                                  DNSServiceFlags flags,
+                                  uint32_t interfaceIndex,
+                                  DNSServiceErrorType errorCode,
+                                  const char *fullname,
+                                  const char *hosttarget,
+                                  uint16_t port, /* In network byte order */
+                                  uint16_t txtLen,
+                                  const unsigned char *txtRecord,
+                                  void *context);
+
+void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
+                                 DNSServiceFlags flags,
+                                 uint32_t interfaceIndex,
+                                 DNSServiceErrorType errorCode,
+                                 const char *serviceName,
+                                 const char *regtype,
+                                 const char *replyDomain,
+                                 void *context) {
+    if (errorCode) {
+        fprintf(stderr, "Service browser for VISCA failed (error %d)\n", errorCode);
+        DNSServiceRefDeallocate(sdRef);
+        g_browseRef = NULL;
+        connectVISCA((char *)context);
+        return;
+    }
+    if (g_resolveRef != NULL) {
+        DNSServiceRefDeallocate(g_resolveRef);
+        g_resolveRef = NULL;
+    }
+    char *stream_name = (char *)context;
+    fprintf(stderr, "Got service %s\n", serviceName);
+    if (source_name_compare(serviceName, stream_name, true)) {
+        fprintf(stderr, "MATCH\n");
+        if (g_resolveRef != NULL) {
+            DNSServiceRefDeallocate(g_browseRef);
+            g_resolveRef = NULL;
+        }
+        fprintf(stderr, "Starting resolver.\n");
+        if (DNSServiceResolve(&g_resolveRef, 0, interfaceIndex, serviceName, regtype, replyDomain, &handleDNSServiceResolveReply, context)
+                              != kDNSServiceErr_NoError) {
+            fprintf(stderr, "Could not start service resolver for VISCA (error %d)\n", errorCode);
+            DNSServiceRefDeallocate(sdRef);
+            g_browseRef = NULL;
+            connectVISCA((char *)context);
+            return;
+        }
+    } else {
+        fprintf(stderr, "NOMATCH\n");
+    }
+    if (flags & kDNSServiceFlagsMoreComing) { return; }  // Keep browsing until we have a full response.
+    DNSServiceRefDeallocate(sdRef);
+    g_browseRef = NULL;
+}
+
+void handleDNSServiceGetAddrInfoReply(DNSServiceRef sdRef,
+                                      DNSServiceFlags flags,
+                                      uint32_t interfaceIndex,
+                                      DNSServiceErrorType errorCode,
+                                      const char *hostname,
+                                      const struct sockaddr *address,
+                                      uint32_t ttl,
+                                      void *context);
+
+void handleDNSServiceResolveReply(DNSServiceRef sdRef,
+                                  DNSServiceFlags flags,
+                                  uint32_t interfaceIndex,
+                                  DNSServiceErrorType errorCode,
+                                  const char *fullname,
+                                  const char *hosttarget,
+                                  uint16_t port,
+                                  uint16_t txtLen,
+                                  const unsigned char *txtRecord,
+                                  void *context) {
+    if (errorCode) {
+        fprintf(stderr, "Service resolver for VISCA failed (error %d)\n", errorCode);
+        DNSServiceRefDeallocate(sdRef);
+        g_resolveRef = NULL;
+        connectVISCA((char *)context);
+        return;
+    }
+    if (g_lookupRef != NULL) {
+        DNSServiceRefDeallocate(g_lookupRef);
+        g_lookupRef = NULL;
+    }
+    if (DNSServiceGetAddrInfo(&g_lookupRef, 0, interfaceIndex, kDNSServiceProtocol_IPv4, hosttarget, &handleDNSServiceGetAddrInfoReply, context)
+                              != kDNSServiceErr_NoError) {
+        fprintf(stderr, "Could not start host resolver for VISCA (error %d)\n", errorCode);
+        DNSServiceRefDeallocate(sdRef);
+        g_resolveRef = NULL;
+        connectVISCA((char *)context);
+        return;
+    }
+
+    if (flags & kDNSServiceFlagsMoreComing) { return; }  // Keep resolving until we have a full response.
+    DNSServiceRefDeallocate(sdRef);
+    g_resolveRef = NULL;
+}
+
+
+void handleDNSServiceGetAddrInfoReply(DNSServiceRef sdRef,
+                                      DNSServiceFlags flags,
+                                      uint32_t interfaceIndex,
+                                      DNSServiceErrorType errorCode,
+                                      const char *hostname,
+                                      const struct sockaddr *address,
+                                      uint32_t ttl,
+                                      void *context) {
+
+    if (errorCode != kDNSServiceErr_NoError) {
+        fprintf(stderr, "Service resolver for VISCA failed (error %d)\n", errorCode);
+    } else {
+        struct sockaddr_in sa;
+        memcpy((void *)&sa, (void *)address, sizeof(struct sockaddr_in));
+
+#ifdef VISCA_UDP
+        sa.sin_port = htons(1259);
+#else
+        sa.sin_port = htons(5678); // 52381
+#endif
+
+        fprintf(stderr, "Connecting to VISCA port %d on %s\n", htons(sa.sin_port), inet_ntoa(sa.sin_addr));
+
+#ifdef VISCA_UDP
+        g_visca_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+#else
+        g_visca_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+#endif
+        if (g_visca_sock == -1) {
+            perror("Socket could not be created.");
+            if (flags & kDNSServiceFlagsMoreComing) { return; }  // Keep browsing until we have a full response.
+            DNSServiceRefDeallocate(sdRef);
+            g_lookupRef = NULL;
+            return;
+        }
+        if (connect(g_visca_sock, (struct sockaddr *) &sa, sizeof(sa)) == -1) {
+            perror("Connect failed");
+            close(g_visca_sock);
+            g_visca_sock = -1;
+    
+            if (flags & kDNSServiceFlagsMoreComing) { return; }  // Keep browsing until we have a full response.
+            DNSServiceRefDeallocate(sdRef);
+            g_lookupRef = NULL;
+            return;
+        }
+        fprintf(stderr, "VISCA ready.\n");
+    }
+
+    if (flags & kDNSServiceFlagsMoreComing) { return; }  // Keep browsing until we have a full response.
+    DNSServiceRefDeallocate(sdRef);
+    g_lookupRef = NULL;
 }
 #endif
 
@@ -744,7 +915,7 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     }
 
 #ifdef INCLUDE_VISCA
-    if (!enable_visca) {
+    if (!enable_visca || g_visca_sock == -1) {
 #endif
         NDIlib_recv_ptz_zoom_speed(pNDI_recv, -copyOfMotionData.zoomPosition);
 #ifdef INCLUDE_VISCA
