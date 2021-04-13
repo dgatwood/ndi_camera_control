@@ -25,11 +25,19 @@
 #define INCLUDE_VISCA
 // #define VISCA_UDP
 
+#ifdef __linux__
+// AVAHI provides only a partial DNS_SD implementation.  Work around it.
+#define USE_AVAHI
+#endif
+
 #ifdef INCLUDE_VISCA
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
-#endif
+#ifdef USE_AVAHI
+#include <netdb.h>
+#endif // USE_AVAHI
+#endif // INCLUDE_VISCA
 
 // #define DEMO_MODE
 
@@ -780,6 +788,11 @@ void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
     g_browseRef = NULL;
 }
 
+int connectToVISCAPortWithAddress(const struct sockaddr *address);
+
+#ifdef USE_AVAHI
+void handleDNSResponse(const struct sockaddr *address);
+#else
 void handleDNSServiceGetAddrInfoReply(DNSServiceRef sdRef,
                                       DNSServiceFlags flags,
                                       uint32_t interfaceIndex,
@@ -788,6 +801,7 @@ void handleDNSServiceGetAddrInfoReply(DNSServiceRef sdRef,
                                       const struct sockaddr *address,
                                       uint32_t ttl,
                                       void *context);
+#endif
 
 void handleDNSServiceResolveReply(DNSServiceRef sdRef,
                                   DNSServiceFlags flags,
@@ -810,8 +824,20 @@ void handleDNSServiceResolveReply(DNSServiceRef sdRef,
         DNSServiceRefDeallocate(g_lookupRef);
         g_lookupRef = NULL;
     }
+#ifdef USE_AVAHI
+    struct addrinfo *result = NULL;
+    if (getaddrinfo(hosttarget, "_ndi._tcp", NULL, &result) == 0) {
+        for (struct addrinfo *pos = result; pos; pos = pos->ai_next) {
+            if (pos->ai_family == AF_INET && g_visca_sock == -1) {
+                handleDNSResponse(result->ai_addr);
+             }
+        }
+    } else
+#else
     if (DNSServiceGetAddrInfo(&g_lookupRef, 0, interfaceIndex, kDNSServiceProtocol_IPv4, hosttarget, &handleDNSServiceGetAddrInfoReply, context)
-                              != kDNSServiceErr_NoError) {
+                              != kDNSServiceErr_NoError)
+#endif
+    {
         fprintf(stderr, "Could not start host resolver for VISCA (error %d)\n", errorCode);
         DNSServiceRefDeallocate(sdRef);
         g_resolveRef = NULL;
@@ -824,6 +850,18 @@ void handleDNSServiceResolveReply(DNSServiceRef sdRef,
     g_resolveRef = NULL;
 }
 
+#ifdef USE_AVAHI
+
+void handleDNSResponse(const struct sockaddr *address) {
+    g_visca_sock = connectToVISCAPortWithAddress(address);
+    if (g_visca_sock == -1) {
+        fprintf(stderr, "VISCA failed.");
+        return;
+    }
+    fprintf(stderr, "VISCA ready.\n");
+}
+
+#else // ! USE_AVAHI
 
 void handleDNSServiceGetAddrInfoReply(DNSServiceRef sdRef,
                                       DNSServiceFlags flags,
@@ -837,34 +875,9 @@ void handleDNSServiceGetAddrInfoReply(DNSServiceRef sdRef,
     if (errorCode != kDNSServiceErr_NoError) {
         fprintf(stderr, "Service resolver for VISCA failed (error %d)\n", errorCode);
     } else {
-        struct sockaddr_in sa;
-        memcpy((void *)&sa, (void *)address, sizeof(struct sockaddr_in));
-
-#ifdef VISCA_UDP
-        sa.sin_port = htons(1259);
-#else
-        sa.sin_port = htons(5678); // 52381
-#endif
-
-        fprintf(stderr, "Connecting to VISCA port %d on %s\n", htons(sa.sin_port), inet_ntoa(sa.sin_addr));
-
-#ifdef VISCA_UDP
-        g_visca_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-#else
-        g_visca_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-#endif
+        g_visca_sock = connectToVISCAPortWithAddress(address);
         if (g_visca_sock == -1) {
-            perror("Socket could not be created.");
-            if (flags & kDNSServiceFlagsMoreComing) { return; }  // Keep browsing until we have a full response.
-            DNSServiceRefDeallocate(sdRef);
-            g_lookupRef = NULL;
-            return;
-        }
-        if (connect(g_visca_sock, (struct sockaddr *) &sa, sizeof(sa)) == -1) {
-            perror("Connect failed");
-            close(g_visca_sock);
-            g_visca_sock = -1;
-    
+            fprintf(stderr, "VISCA failed.");
             if (flags & kDNSServiceFlagsMoreComing) { return; }  // Keep browsing until we have a full response.
             DNSServiceRefDeallocate(sdRef);
             g_lookupRef = NULL;
@@ -877,9 +890,37 @@ void handleDNSServiceGetAddrInfoReply(DNSServiceRef sdRef,
     DNSServiceRefDeallocate(sdRef);
     g_lookupRef = NULL;
 }
+#endif // USE_AVAHI
+
+int connectToVISCAPortWithAddress(const struct sockaddr *address) {
+    struct sockaddr_in sa;
+    memcpy((void *)&sa, (void *)address, sizeof(struct sockaddr_in));
+
+#ifdef VISCA_UDP
+    sa.sin_port = htons(1259);
+#else
+    sa.sin_port = htons(5678); // 52381
 #endif
 
-#ifdef INCLUDE_VISCA
+    fprintf(stderr, "Connecting to VISCA port %d on %s\n", htons(sa.sin_port), inet_ntoa(sa.sin_addr));
+
+#ifdef VISCA_UDP
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+#else
+    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+#endif
+    if (sock == -1) {
+        perror("Socket could not be created.");
+        return -1;
+    }
+    if (connect(g_visca_sock, (struct sockaddr *) &sa, sizeof(sa)) == -1) {
+        perror("Connect failed");
+        close(sock);
+        return -1;
+    }
+    return sock;
+}
+
 void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
     uint8_t buf[6] = { 0x81, 0x01, 0x04, 0x07, 0x00, 0xFF };
     int level = (int)(motionData->zoomPosition * 7.9);
