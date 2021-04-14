@@ -23,7 +23,6 @@
 #include <Processing.NDI.Lib.h>
 
 #define INCLUDE_VISCA
-// #define VISCA_UDP
 
 #ifdef __linux__
 // AVAHI provides only a partial DNS_SD implementation.  Work around it.
@@ -146,6 +145,8 @@ bool g_ptzEnabled = false;
 
 #ifdef INCLUDE_VISCA
 int g_visca_sock = -1;
+int g_visca_port = 0;
+bool g_visca_use_udp = false;
 #endif
 
 #if __linux__
@@ -209,10 +210,18 @@ int main(int argc, char *argv[]) {
 #ifdef INCLUDE_VISCA
         if (!strcmp(argv[i], "-V") || !strcmp(argv[i], "--enable_visca")) {
             fprintf(stderr, "Enabling VISCA-over-IP control.\n");
+            enable_visca = true;
+        }
+        if (!strcmp(argv[i], "-u") || !strcmp(argv[i], "--visca_use_udp")) {
+            fprintf(stderr, "Enabling VISCA UDP.\n");
+            g_visca_use_udp = true;
+        }
+        if (!strcmp(argv[i], "-p") || !strcmp(argv[i], "--visca_port")) {
             if (argc > i + 1) {
-              enable_visca = true;
+              g_visca_port = atoi(argv[i+1]);
               i++;
             }
+            fprintf(stderr, "Using port %d for VISCA.\n", g_visca_port);
         }
 #endif
     }
@@ -714,7 +723,9 @@ void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
 
 bool connectVISCA(char *stream_name) {
     if (g_browseRef != NULL) {
+#ifndef USE_AVAHI
         DNSServiceRefDeallocate(g_browseRef);
+#endif
         g_browseRef = NULL;
     }
     // Start browsing for the service.
@@ -754,13 +765,17 @@ void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
                                  void *context) {
     if (errorCode) {
         fprintf(stderr, "Service browser for VISCA failed (error %d)\n", errorCode);
+#ifndef USE_AVAHI
         DNSServiceRefDeallocate(sdRef);
+#endif
         g_browseRef = NULL;
         connectVISCA((char *)context);
         return;
     }
     if (g_resolveRef != NULL) {
+#ifndef USE_AVAHI
         DNSServiceRefDeallocate(g_resolveRef);
+#endif
         g_resolveRef = NULL;
     }
     char *stream_name = (char *)context;
@@ -768,14 +783,18 @@ void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
     if (source_name_compare(serviceName, stream_name, true)) {
         fprintf(stderr, "MATCH\n");
         if (g_resolveRef != NULL) {
+#ifndef USE_AVAHI
             DNSServiceRefDeallocate(g_browseRef);
+#endif
             g_resolveRef = NULL;
         }
         fprintf(stderr, "Starting resolver.\n");
         if (DNSServiceResolve(&g_resolveRef, 0, interfaceIndex, serviceName, regtype, replyDomain, &handleDNSServiceResolveReply, context)
                               != kDNSServiceErr_NoError) {
             fprintf(stderr, "Could not start service resolver for VISCA (error %d)\n", errorCode);
+#ifndef USE_AVAHI
             DNSServiceRefDeallocate(sdRef);
+#endif
             g_browseRef = NULL;
             connectVISCA((char *)context);
             return;
@@ -784,7 +803,9 @@ void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
         fprintf(stderr, "NOMATCH\n");
     }
     if (flags & kDNSServiceFlagsMoreComing) { return; }  // Keep browsing until we have a full response.
+#ifndef USE_AVAHI
     DNSServiceRefDeallocate(sdRef);
+#endif
     g_browseRef = NULL;
 }
 
@@ -813,24 +834,36 @@ void handleDNSServiceResolveReply(DNSServiceRef sdRef,
                                   uint16_t txtLen,
                                   const unsigned char *txtRecord,
                                   void *context) {
+    fprintf(stderr, "VISCA resolved\n");
     if (errorCode) {
         fprintf(stderr, "Service resolver for VISCA failed (error %d)\n", errorCode);
+#ifndef USE_AVAHI
         DNSServiceRefDeallocate(sdRef);
+#endif
         g_resolveRef = NULL;
         connectVISCA((char *)context);
         return;
     }
     if (g_lookupRef != NULL) {
+#ifndef USE_AVAHI
         DNSServiceRefDeallocate(g_lookupRef);
+#endif
         g_lookupRef = NULL;
     }
 #ifdef USE_AVAHI
     struct addrinfo *result = NULL;
-    if (getaddrinfo(hosttarget, "_ndi._tcp", NULL, &result) == 0) {
+    int resultCode = getaddrinfo(hosttarget, NULL, NULL, &result);
+    if (resultCode == 0) {
         for (struct addrinfo *pos = result; pos; pos = pos->ai_next) {
             if (pos->ai_family == AF_INET && g_visca_sock == -1) {
                 handleDNSResponse(result->ai_addr);
              }
+        }
+        if (g_visca_sock != -1) {
+#ifndef USE_AVAHI
+            DNSServiceRefDeallocate(sdRef);
+#endif
+            g_resolveRef = NULL;
         }
     } else
 #else
@@ -838,15 +871,24 @@ void handleDNSServiceResolveReply(DNSServiceRef sdRef,
                               != kDNSServiceErr_NoError)
 #endif
     {
+#ifdef USE_AVAHI
+        perror("Could not resolve host for VISCA\n");
+        fprintf(stderr, "Error code %d\n", resultCode);
+#else
         fprintf(stderr, "Could not start host resolver for VISCA (error %d)\n", errorCode);
+#endif
+#ifndef USE_AVAHI
         DNSServiceRefDeallocate(sdRef);
+#endif
         g_resolveRef = NULL;
         connectVISCA((char *)context);
         return;
     }
 
     if (flags & kDNSServiceFlagsMoreComing) { return; }  // Keep resolving until we have a full response.
+#ifndef USE_AVAHI
     DNSServiceRefDeallocate(sdRef);
+#endif
     g_resolveRef = NULL;
 }
 
@@ -879,7 +921,9 @@ void handleDNSServiceGetAddrInfoReply(DNSServiceRef sdRef,
         if (g_visca_sock == -1) {
             fprintf(stderr, "VISCA failed.");
             if (flags & kDNSServiceFlagsMoreComing) { return; }  // Keep browsing until we have a full response.
+#ifndef USE_AVAHI
             DNSServiceRefDeallocate(sdRef);
+#endif
             g_lookupRef = NULL;
             return;
         }
@@ -887,7 +931,9 @@ void handleDNSServiceGetAddrInfoReply(DNSServiceRef sdRef,
     }
 
     if (flags & kDNSServiceFlagsMoreComing) { return; }  // Keep browsing until we have a full response.
+#ifndef USE_AVAHI
     DNSServiceRefDeallocate(sdRef);
+#endif
     g_lookupRef = NULL;
 }
 #endif // USE_AVAHI
@@ -896,24 +942,24 @@ int connectToVISCAPortWithAddress(const struct sockaddr *address) {
     struct sockaddr_in sa;
     memcpy((void *)&sa, (void *)address, sizeof(struct sockaddr_in));
 
-#ifdef VISCA_UDP
-    sa.sin_port = htons(1259);
-#else
-    sa.sin_port = htons(5678); // 52381
-#endif
+    if (g_visca_port != 0) {
+        fprintf(stderr, "Connecting to custom VISCA port %d\n", g_visca_port);
+        sa.sin_port = htons(g_visca_port);
+    } else {
+        // Marshall uses 52381 UDP; PTZOptics uses 5678 TCP or 1259 UDP.
+        sa.sin_port = g_visca_use_udp ? htons(1259) : htons(5678);
+    }
 
     fprintf(stderr, "Connecting to VISCA port %d on %s\n", htons(sa.sin_port), inet_ntoa(sa.sin_addr));
 
-#ifdef VISCA_UDP
-    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-#else
-    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-#endif
+    int sock = g_visca_use_udp ?
+        socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP) :
+        socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock == -1) {
         perror("Socket could not be created.");
         return -1;
     }
-    if (connect(g_visca_sock, (struct sockaddr *) &sa, sizeof(sa)) == -1) {
+    if (connect(sock, (struct sockaddr *) &sa, sizeof(sa)) == -1) {
         perror("Connect failed");
         close(sock);
         return -1;
@@ -922,22 +968,44 @@ int connectToVISCAPortWithAddress(const struct sockaddr *address) {
 }
 
 void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
+    static uint32_t sequenceNumber = 0;
     uint8_t buf[6] = { 0x81, 0x01, 0x04, 0x07, 0x00, 0xFF };
-    int level = (int)(motionData->zoomPosition * 7.9);
+    int level = (int)(motionData->zoomPosition * 8.9);
 
     if (level < 0) {  // Zoom in
-        buf[4] = 0x20 | (-level);
+        buf[4] = 0x20 | (1 - level);
     } else if (level > 0) {
-        buf[4] = 0x30 | level;
+        buf[4] = 0x30 | (level - 1);
     }
 
     if (g_visca_sock == -1) {
         return;
     }
-    write(g_visca_sock, buf, 6);
+    if (g_visca_use_udp) {
+        uint8_t udpbuf[14];
+        udpbuf[0] = 0x01;
+        udpbuf[1] = 0x00;
+        udpbuf[2] = 0x00;
+        udpbuf[3] = 0x06;
+        udpbuf[4] = sequenceNumber >> 24;
+        udpbuf[5] = (sequenceNumber >> 16) & 0xff;
+        udpbuf[6] = (sequenceNumber >> 8) & 0xff;
+        udpbuf[7] = sequenceNumber & 0xff;
+        sequenceNumber++;
+        bcopy(buf, udpbuf + 8, sizeof(buf));
+        if (write(g_visca_sock, udpbuf, sizeof(udpbuf)) != sizeof(udpbuf)) {
+            perror("write failed.");
+        }
+    } else {
+        if (write(g_visca_sock, buf, sizeof(buf)) != sizeof(buf)) {
+            perror("write failed.");
+        }
+    }
 
     char ack[3];
-    read(g_visca_sock, ack, 3);
+    if (!g_visca_use_udp) {
+        read(g_visca_sock, ack, 3);
+    }
 }
 #endif
 
@@ -959,6 +1027,7 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     if (!enable_visca || g_visca_sock == -1) {
 #endif
         NDIlib_recv_ptz_zoom_speed(pNDI_recv, -copyOfMotionData.zoomPosition);
+
 #ifdef INCLUDE_VISCA
     }
 #endif
