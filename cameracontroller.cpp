@@ -6,7 +6,6 @@
 #include <string>
 #include <thread>
 
-#include <dns_sd.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -25,17 +24,22 @@
 #define INCLUDE_VISCA
 
 #ifdef __linux__
-// AVAHI provides only a partial DNS_SD implementation.  Work around it.
 #define USE_AVAHI
 #endif
 
 #ifdef INCLUDE_VISCA
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#ifdef USE_AVAHI
-#include <netdb.h>
-#endif // USE_AVAHI
+    #include <arpa/inet.h>
+    #include <netinet/in.h>
+    #include <sys/socket.h>
+    #ifdef USE_AVAHI
+        #include <avahi-client/client.h>
+        #include <avahi-client/lookup.h>
+        #include <avahi-common/simple-watch.h>
+        #include <avahi-common/malloc.h>
+        #include <avahi-common/error.h>
+    #else
+        #include <dns_sd.h>
+    #endif // USE_AVAHI
 #endif // INCLUDE_VISCA
 
 // #define DEMO_MODE
@@ -144,20 +148,26 @@ enum {
 bool g_ptzEnabled = false;
 
 #ifdef INCLUDE_VISCA
-int g_visca_sock = -1;
-int g_visca_port = 0;
-bool g_visca_use_udp = false;
+    int g_visca_sock = -1;
+    int g_visca_port = 0;
+    bool g_visca_use_udp = false;
 #endif
 
 #if __linux__
-pthread_mutex_t g_motionMutex = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER_NP;
+    pthread_mutex_t g_motionMutex = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER_NP;
 #else
-pthread_mutex_t g_motionMutex = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER;
+    pthread_mutex_t g_motionMutex = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER;
 #endif
 
 motionData_t g_motionData;
 
-DNSServiceRef g_browseRef = NULL, g_resolveRef = NULL, g_lookupRef = NULL;
+#ifdef USE_AVAHI
+    AvahiSimplePoll *g_avahi_simple_poll = NULL;
+    AvahiClient *g_avahi_client = NULL;
+    AvahiServiceBrowser *g_avahi_service_browser = NULL;
+#else
+    DNSServiceRef g_browseRef = NULL, g_resolveRef = NULL, g_lookupRef = NULL;
+#endif
 
 static std::atomic<bool> exit_loop(false);
 static void sigint_handler(int)
@@ -175,16 +185,16 @@ uint32_t find_named_source(const NDIlib_source_t *p_sources,
                            bool use_fallback);
 
 #ifdef INCLUDE_VISCA
-bool connectVISCA(char *stream_name);
+    bool connectVISCA(char *stream_name);
 #endif
 
 #ifdef DEMO_MODE
-void demoPTZValues(void);
+    void demoPTZValues(void);
 #endif
 
 #ifdef __linux__
-int pinNumberForAxis(int axis);
-int pinNumberForButton(int button);
+    int pinNumberForAxis(int axis);
+    int pinNumberForButton(int button);
 #endif  // __linux__
 
 int main(int argc, char *argv[]) {
@@ -258,7 +268,7 @@ int main(int argc, char *argv[]) {
         std::string ndi_path;
 
         // Try to look up the NDI SDK shared library.
-        const char* p_NDI_runtime_folder = ::getenv("NDI_RUNTIME_DIR_V4");
+        const char *p_NDI_runtime_folder = ::getenv("NDI_RUNTIME_DIR_V4");
         if (p_NDI_runtime_folder) {
             ndi_path = p_NDI_runtime_folder;
             ndi_path += "/libndi.dylib";
@@ -397,6 +407,16 @@ int main(int argc, char *argv[]) {
                 || enable_visca
 #endif
                ) {
+#ifdef USE_AVAHI
+                if (avahi_simple_poll_iterate(g_avahi_simple_poll, 0) != 0) {
+                    // Something went horribly wrong.  Just null out the references and start over.
+                    g_avahi_simple_poll = NULL;
+                    g_avahi_client = NULL;
+                    g_avahi_service_browser = NULL;
+
+                    enable_visca = connectVISCA(stream_name);
+                }
+#else
                 if (g_browseRef != NULL) {
                     DNSServiceProcessResult(g_browseRef);
                 }
@@ -406,6 +426,7 @@ int main(int argc, char *argv[]) {
                 if (g_lookupRef != NULL) {
                     DNSServiceProcessResult(g_lookupRef);
                 }
+#endif
                 sendPTZUpdates(pNDI_recv);
             } else {
                 if (enable_debugging) {
@@ -712,6 +733,189 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
 #endif
 
 #ifdef INCLUDE_VISCA
+
+int connectToVISCAPortWithAddress(const struct sockaddr *address);
+
+#ifdef USE_AVAHI
+
+void avahi_client_callback(AvahiClient *c, AvahiClientState state, AVAHI_GCC_UNUSED void * userdata);
+void avahi_resolve_callback(AvahiServiceResolver *r,
+                            AVAHI_GCC_UNUSED AvahiIfIndex interface,
+                            AVAHI_GCC_UNUSED AvahiProtocol protocol,
+                            AvahiResolverEvent event,
+                            const char *name,
+                            const char *type,
+                            const char *domain,
+                            const char *host_name,
+                            const AvahiAddress *address,
+                            uint16_t port,
+                            AvahiStringList *txt,
+                            AvahiLookupResultFlags flags,
+                            AVAHI_GCC_UNUSED void* userdata);
+void avahi_browse_callback(AvahiServiceBrowser *browser,
+                           AvahiIfIndex interface,
+                           AvahiProtocol protocol,
+                           AvahiBrowserEvent event,
+                           const char *name,
+                           const char *type,
+                           const char *domain,
+                           AVAHI_GCC_UNUSED AvahiLookupResultFlags flags,
+                           void *userdata);
+void handleDNSResponse(const struct sockaddr *address);
+
+bool connectVISCA(char *stream_name) {
+    if (!g_avahi_simple_poll) {
+        if (!(g_avahi_simple_poll = avahi_simple_poll_new())) {
+            fprintf(stderr, "Failed to create Avahi run loop.\n");
+            return false;
+        }
+    }
+    if (g_avahi_client == NULL) {
+        int error;
+        g_avahi_client = avahi_client_new(avahi_simple_poll_get(g_avahi_simple_poll),
+                                          (AvahiClientFlags)0,
+                                          avahi_client_callback,
+                                          NULL,
+                                          &error);
+        if (!g_avahi_client) {
+            fprintf(stderr, "Failed to create Avahi client (error %d).\n", error);
+            return false;
+        }
+    }
+
+    if (!(g_avahi_service_browser = avahi_service_browser_new(g_avahi_client,
+                                                              AVAHI_IF_UNSPEC,
+                                                              AVAHI_PROTO_UNSPEC,
+                                                              "_ndi._tcp",
+                                                              NULL,
+                                                              (AvahiLookupFlags)0,
+                                                              avahi_browse_callback,
+                                                              stream_name))) {
+        fprintf(stderr, "Failed to create service browser: %s\n",
+                avahi_strerror(avahi_client_errno(g_avahi_client)));
+        return false;
+    }
+    return true;
+}
+
+void avahi_client_callback(AvahiClient *client, AvahiClientState state, AVAHI_GCC_UNUSED void * userdata) {
+    if (state == AVAHI_CLIENT_FAILURE) {
+        fprintf(stderr, "Server connection failure: %s\n", avahi_strerror(avahi_client_errno(client)));
+        avahi_simple_poll_quit(g_avahi_simple_poll);
+    }
+}
+
+void avahi_browse_callback(AvahiServiceBrowser *browser,
+                           AvahiIfIndex interface,
+                           AvahiProtocol protocol,
+                           AvahiBrowserEvent event,
+                           const char *name,
+                           const char *type,
+                           const char *domain,
+                           AVAHI_GCC_UNUSED AvahiLookupResultFlags flags,
+                           void *userdata) {
+    char *stream_name = (char *)userdata;
+
+    switch (event) {
+        case AVAHI_BROWSER_FAILURE:
+            fprintf(stderr, "Avahi browser failed: %s\n",
+                    avahi_strerror(avahi_client_errno(avahi_service_browser_get_client(browser))));
+            avahi_simple_poll_quit(g_avahi_simple_poll);
+            return;
+        case AVAHI_BROWSER_NEW:
+            if (source_name_compare(name, stream_name, true)) {
+                if (!avahi_service_resolver_new(g_avahi_client,
+                                                interface,
+                                                protocol,
+                                                name,
+                                                type,
+                                                domain,
+                                                AVAHI_PROTO_UNSPEC,
+                                                (AvahiLookupFlags)0,
+                                                avahi_resolve_callback,
+                                                g_avahi_client)) {
+                    fprintf(stderr, "Failed to resolve service '%s': %s\n",
+                            name,
+                            avahi_strerror(avahi_client_errno(g_avahi_client)));
+                }
+            }
+            break;
+        case AVAHI_BROWSER_REMOVE:
+            break;
+        case AVAHI_BROWSER_ALL_FOR_NOW:
+        case AVAHI_BROWSER_CACHE_EXHAUSTED:
+            break;
+    }
+}
+
+void avahi_resolve_callback(AvahiServiceResolver *resolver,
+                            AVAHI_GCC_UNUSED AvahiIfIndex interface,
+                            AVAHI_GCC_UNUSED AvahiProtocol protocol,
+                            AvahiResolverEvent event,
+                            const char *name,
+                            const char *type,
+                            const char *domain,
+                            const char *host_name,
+                            const AvahiAddress *address,
+                            uint16_t port,
+                            AvahiStringList *txt,
+                            AvahiLookupResultFlags flags,
+                            AVAHI_GCC_UNUSED void* userdata) {
+
+    switch (event) {
+        case AVAHI_RESOLVER_FAILURE:
+            fprintf(stderr, "Resolver failed: %s\n",
+                    avahi_strerror(avahi_client_errno(avahi_service_resolver_get_client(resolver))));
+            break;
+        case AVAHI_RESOLVER_FOUND:
+            if (address->proto == AVAHI_PROTO_INET && g_visca_sock == -1) {
+                struct sockaddr_in sa;
+                bzero(&sa, sizeof(sa));
+                sa.sin_family = AF_INET;
+                sa.sin_port = htons(port);
+                sa.sin_addr.s_addr = address->data.ipv4.address;
+                handleDNSResponse((sockaddr *)&sa);
+            }
+            if (g_visca_sock == -1) {
+                // Keep trying.
+                return;
+            }
+            break;
+    }
+    avahi_service_resolver_free(resolver);
+}
+
+void handleDNSResponse(const struct sockaddr *address) {
+    g_visca_sock = connectToVISCAPortWithAddress(address);
+    if (g_visca_sock == -1) {
+        fprintf(stderr, "VISCA failed.");
+        return;
+    }
+    fprintf(stderr, "VISCA ready.\n");
+}
+
+#else // ! USE_AVAHI
+
+void handleDNSServiceResolveReply(DNSServiceRef sdRef,
+                                  DNSServiceFlags flags,
+                                  uint32_t interfaceIndex,
+                                  DNSServiceErrorType errorCode,
+                                  const char *fullname,
+                                  const char *hosttarget,
+                                  uint16_t port, /* In network byte order */
+                                  uint16_t txtLen,
+                                  const unsigned char *txtRecord,
+                                  void *context);
+
+void handleDNSServiceGetAddrInfoReply(DNSServiceRef sdRef,
+                                      DNSServiceFlags flags,
+                                      uint32_t interfaceIndex,
+                                      DNSServiceErrorType errorCode,
+                                      const char *hostname,
+                                      const struct sockaddr *address,
+                                      uint32_t ttl,
+                                      void *context);
+
 void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
                                  DNSServiceFlags flags,
                                  uint32_t interfaceIndex,
@@ -723,9 +927,7 @@ void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
 
 bool connectVISCA(char *stream_name) {
     if (g_browseRef != NULL) {
-#ifndef USE_AVAHI
         DNSServiceRefDeallocate(g_browseRef);
-#endif
         g_browseRef = NULL;
     }
     // Start browsing for the service.
@@ -744,17 +946,6 @@ bool connectVISCA(char *stream_name) {
     return true;
 }
 
-void handleDNSServiceResolveReply(DNSServiceRef sdRef,
-                                  DNSServiceFlags flags,
-                                  uint32_t interfaceIndex,
-                                  DNSServiceErrorType errorCode,
-                                  const char *fullname,
-                                  const char *hosttarget,
-                                  uint16_t port, /* In network byte order */
-                                  uint16_t txtLen,
-                                  const unsigned char *txtRecord,
-                                  void *context);
-
 void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
                                  DNSServiceFlags flags,
                                  uint32_t interfaceIndex,
@@ -765,17 +956,13 @@ void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
                                  void *context) {
     if (errorCode) {
         fprintf(stderr, "Service browser for VISCA failed (error %d)\n", errorCode);
-#ifndef USE_AVAHI
         DNSServiceRefDeallocate(sdRef);
-#endif
         g_browseRef = NULL;
         connectVISCA((char *)context);
         return;
     }
     if (g_resolveRef != NULL) {
-#ifndef USE_AVAHI
         DNSServiceRefDeallocate(g_resolveRef);
-#endif
         g_resolveRef = NULL;
     }
     char *stream_name = (char *)context;
@@ -783,18 +970,14 @@ void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
     if (source_name_compare(serviceName, stream_name, true)) {
         fprintf(stderr, "MATCH\n");
         if (g_resolveRef != NULL) {
-#ifndef USE_AVAHI
             DNSServiceRefDeallocate(g_browseRef);
-#endif
             g_resolveRef = NULL;
         }
         fprintf(stderr, "Starting resolver.\n");
         if (DNSServiceResolve(&g_resolveRef, 0, interfaceIndex, serviceName, regtype, replyDomain, &handleDNSServiceResolveReply, context)
                               != kDNSServiceErr_NoError) {
             fprintf(stderr, "Could not start service resolver for VISCA (error %d)\n", errorCode);
-#ifndef USE_AVAHI
             DNSServiceRefDeallocate(sdRef);
-#endif
             g_browseRef = NULL;
             connectVISCA((char *)context);
             return;
@@ -803,26 +986,9 @@ void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
         fprintf(stderr, "NOMATCH\n");
     }
     if (flags & kDNSServiceFlagsMoreComing) { return; }  // Keep browsing until we have a full response.
-#ifndef USE_AVAHI
     DNSServiceRefDeallocate(sdRef);
-#endif
     g_browseRef = NULL;
 }
-
-int connectToVISCAPortWithAddress(const struct sockaddr *address);
-
-#ifdef USE_AVAHI
-void handleDNSResponse(const struct sockaddr *address);
-#else
-void handleDNSServiceGetAddrInfoReply(DNSServiceRef sdRef,
-                                      DNSServiceFlags flags,
-                                      uint32_t interfaceIndex,
-                                      DNSServiceErrorType errorCode,
-                                      const char *hostname,
-                                      const struct sockaddr *address,
-                                      uint32_t ttl,
-                                      void *context);
-#endif
 
 void handleDNSServiceResolveReply(DNSServiceRef sdRef,
                                   DNSServiceFlags flags,
@@ -837,73 +1003,29 @@ void handleDNSServiceResolveReply(DNSServiceRef sdRef,
     fprintf(stderr, "VISCA resolved\n");
     if (errorCode) {
         fprintf(stderr, "Service resolver for VISCA failed (error %d)\n", errorCode);
-#ifndef USE_AVAHI
         DNSServiceRefDeallocate(sdRef);
-#endif
         g_resolveRef = NULL;
         connectVISCA((char *)context);
         return;
     }
     if (g_lookupRef != NULL) {
-#ifndef USE_AVAHI
         DNSServiceRefDeallocate(g_lookupRef);
-#endif
         g_lookupRef = NULL;
     }
-#ifdef USE_AVAHI
-    struct addrinfo *result = NULL;
-    int resultCode = getaddrinfo(hosttarget, NULL, NULL, &result);
-    if (resultCode == 0) {
-        for (struct addrinfo *pos = result; pos; pos = pos->ai_next) {
-            if (pos->ai_family == AF_INET && g_visca_sock == -1) {
-                handleDNSResponse(result->ai_addr);
-             }
-        }
-        if (g_visca_sock != -1) {
-#ifndef USE_AVAHI
-            DNSServiceRefDeallocate(sdRef);
-#endif
-            g_resolveRef = NULL;
-        }
-    } else
-#else
     if (DNSServiceGetAddrInfo(&g_lookupRef, 0, interfaceIndex, kDNSServiceProtocol_IPv4, hosttarget, &handleDNSServiceGetAddrInfoReply, context)
                               != kDNSServiceErr_NoError)
-#endif
     {
-#ifdef USE_AVAHI
-        perror("Could not resolve host for VISCA\n");
-        fprintf(stderr, "Error code %d\n", resultCode);
-#else
         fprintf(stderr, "Could not start host resolver for VISCA (error %d)\n", errorCode);
-#endif
-#ifndef USE_AVAHI
         DNSServiceRefDeallocate(sdRef);
-#endif
         g_resolveRef = NULL;
         connectVISCA((char *)context);
         return;
     }
 
     if (flags & kDNSServiceFlagsMoreComing) { return; }  // Keep resolving until we have a full response.
-#ifndef USE_AVAHI
     DNSServiceRefDeallocate(sdRef);
-#endif
     g_resolveRef = NULL;
 }
-
-#ifdef USE_AVAHI
-
-void handleDNSResponse(const struct sockaddr *address) {
-    g_visca_sock = connectToVISCAPortWithAddress(address);
-    if (g_visca_sock == -1) {
-        fprintf(stderr, "VISCA failed.");
-        return;
-    }
-    fprintf(stderr, "VISCA ready.\n");
-}
-
-#else // ! USE_AVAHI
 
 void handleDNSServiceGetAddrInfoReply(DNSServiceRef sdRef,
                                       DNSServiceFlags flags,
@@ -921,9 +1043,7 @@ void handleDNSServiceGetAddrInfoReply(DNSServiceRef sdRef,
         if (g_visca_sock == -1) {
             fprintf(stderr, "VISCA failed.");
             if (flags & kDNSServiceFlagsMoreComing) { return; }  // Keep browsing until we have a full response.
-#ifndef USE_AVAHI
             DNSServiceRefDeallocate(sdRef);
-#endif
             g_lookupRef = NULL;
             return;
         }
@@ -931,11 +1051,10 @@ void handleDNSServiceGetAddrInfoReply(DNSServiceRef sdRef,
     }
 
     if (flags & kDNSServiceFlagsMoreComing) { return; }  // Keep browsing until we have a full response.
-#ifndef USE_AVAHI
     DNSServiceRefDeallocate(sdRef);
-#endif
     g_lookupRef = NULL;
 }
+
 #endif // USE_AVAHI
 
 int connectToVISCAPortWithAddress(const struct sockaddr *address) {
