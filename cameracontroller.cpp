@@ -479,8 +479,10 @@ bool source_name_compare(const char *name1, const char *name2, bool use_fallback
     truncate_name_before_ip(truncname1);
     truncate_name_before_ip(truncname2);
 
-fprintf(stderr, "CMP \"%s\" ?= \"%s\"\n", truncname1, truncname2);
-    return !strcmp(truncname1, truncname2);
+    bool retval = !strcmp(truncname1, truncname2);
+    fprintf(stderr, "CMP \"%s\" ?= \"%s\" : %s\n", truncname1, truncname2,
+            retval ? "true" : "false");
+    return retval;
 }
 
 uint32_t find_named_source(const NDIlib_source_t *p_sources,
