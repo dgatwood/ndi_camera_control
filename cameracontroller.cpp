@@ -1213,6 +1213,7 @@ float readAxisPosition(int axis) {
         } else {
             value = value * value;  // Logarithmic curve.
         }
+        if (value > -0.05 && value < 0.05) { value = 0; }  // Keep the center stable.
 
         if (enable_verbose_debugging) {
             fprintf(stderr, "axis %d: raw: %d scaled: %f\n", axis, rawValue, value);
