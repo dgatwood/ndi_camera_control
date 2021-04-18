@@ -22,7 +22,8 @@
 #include <Processing.NDI.Lib.h>
 
 #define INCLUDE_VISCA
-#undef USE_VISCA_PAN_AND_TILT
+#undef USE_VISCA_FOR_PAN_AND_TILT
+#undef USE_VISCA_FOR_EXPOSURE_COMPENSATION
 
 #ifdef __linux__
 #define USE_AVAHI
@@ -152,6 +153,8 @@ enum {
 
 bool g_ptzEnabled = false;
 
+int8_t g_exposure_compensation = 0;
+
 #ifdef INCLUDE_VISCA
     int g_visca_sock = -1;
     int g_visca_port = 0;
@@ -234,6 +237,22 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Enabling VISCA UDP.\n");
             g_visca_use_udp = true;
         }
+#ifdef USE_VISCA_FOR_EXPOSURE_COMPENSATION
+        // NDI only has exposure setting, VISCA only has compensation, iris, gain,
+        // and shutter speed.  Ugh.
+        if (!strcmp(argv[i], "-e") || !strcmp(argv[i], "--exposure_compensation")) {
+            if (argc > i + 1) {
+              g_exposure_compensation = atoi(argv[i+1]);
+              i++;
+            }
+            if (g_exposure_compensation > 5 || g_exposure_compensation < -5) {
+                fprintf(stderr, "Invalid exposure compentation %d.  (Valid range: -5 to 5)\n", g_exposure_compensation);
+                g_exposure_compensation = 0;
+            } else {
+                fprintf(stderr, "Set exposure compentation to %d.\n", g_exposure_compensation);
+            }
+        }
+#endif
         if (!strcmp(argv[i], "-p") || !strcmp(argv[i], "--visca_port")) {
             if (argc > i + 1) {
               g_visca_port = atoi(argv[i+1]);
@@ -1098,10 +1117,15 @@ int connectToVISCAPortWithAddress(const struct sockaddr *address) {
 
 void sendZoomUpdatesOverVISCA(motionData_t *motionData);
 void sendPanTiltUpdatesOverVISCA(motionData_t *motionData);
+void sendExposureCompensationOverVISCA(void);
+
 void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
     sendZoomUpdatesOverVISCA(motionData);
-#ifdef USE_VISCA_PAN_AND_TILT
+#ifdef USE_VISCA_FOR_PAN_AND_TILT
     sendPanTiltUpdatesOverVISCA(motionData);
+#endif
+#ifdef USE_VISCA_FOR_EXPOSURE_COMPENSATION
+    sendExposureCompensationOverVISCA(void);
 #endif
 }
 
@@ -1147,28 +1171,29 @@ void sendZoomUpdatesOverVISCA(motionData_t *motionData) {
 }
 
 void sendPanTiltUpdatesOverVISCA(motionData_t *motionData) {
-    bool left = motionData->xAxisPosition > 0;
-    bool right = motionData->xAxisPosition < 0;
-    bool up = motionData->yAxisPosition > 0;
-    bool down = motionData->yAxisPosition < 0;
+    int pan_level = (int)(motionData->xAxisPosition * 24.9);
+    int tilt_level = (int)(motionData->yAxisPosition * 24.9);
+
+    bool left = pan_level > 0;
+    bool right = pan_level < 0;
+    bool up = tilt_level > 0;
+    bool down = tilt_level < 0;
 
     uint8_t pan_command = left ? 0x01 : right ? 0x02 : 0x03;
     uint8_t tilt_command = up ? 0x01 : down ? 0x02 : 0x03;
 
     uint8_t buf[9] = { 0x81, 0x01, 0x06, 0x01, 0x00, 0x00, pan_command, tilt_command, 0xFF };
-    int pan_level = (int)(motionData->xAxisPosition * 24.9);
-    int tilt_level = (int)(motionData->yAxisPosition * 24.9);
 
     if (pan_level < 0) {  // Pan right
-        buf[4] = 0x20 | (1 - pan_level); // Pan speed
+        buf[4] = (pan_level - 1); // Pan speed: 0 to -24
     } else if (pan_level > 0) {
-        buf[4] = 0x30 | (pan_level - 1); // Pan speed
+        buf[4] = (pan_level + 1); // Pan speed: 0 to 24
     }
 
     if (tilt_level < 0) {  // Tilt down
-        buf[5] = 0x20 | (1 - tilt_level); // Tilt speed
+        buf[5] = (1 - tilt_level); // Tilt speed: 0 to -24
     } else if (tilt_level > 0) {
-        buf[5] = 0x30 | (tilt_level - 1); // Tilt speed
+        buf[5] = (tilt_level - 1); // Tilt speed: 0 to 24
     }
 
     if (g_visca_sock == -1) {
@@ -1201,6 +1226,40 @@ void sendPanTiltUpdatesOverVISCA(motionData_t *motionData) {
     }
 }
 
+void sendExposureCompensationOverVISCA(void) {
+    uint8_t exposure_compensation_scaled = (uint8_t)(g_exposure_compensation + 5); // Range now 0 to 10
+    uint8_t buf[9] = { 0x81, 0x01, 0x04, 0x4E, 0x00, 0x00, (uint8_t)((exposure_compensation_scaled >> 4) & 0xf),
+                       (uint8_t)(exposure_compensation_scaled & 0xf), 0xFF };
+
+    if (g_visca_sock == -1) {
+        return;
+    }
+    if (g_visca_use_udp) {
+        uint8_t udpbuf[sizeof(buf) + 8];
+        udpbuf[0] = 0x01;
+        udpbuf[1] = 0x00;
+        udpbuf[2] = 0x00;
+        udpbuf[3] = sizeof(buf);
+        udpbuf[4] = g_visca_sequence_number >> 24;
+        udpbuf[5] = (g_visca_sequence_number >> 16) & 0xff;
+        udpbuf[6] = (g_visca_sequence_number >> 8) & 0xff;
+        udpbuf[7] = g_visca_sequence_number & 0xff;
+        g_visca_sequence_number++;
+        bcopy(buf, udpbuf + 8, sizeof(buf));
+        if (write(g_visca_sock, udpbuf, sizeof(udpbuf)) != sizeof(udpbuf)) {
+            perror("write failed.");
+        }
+    } else {
+        if (write(g_visca_sock, buf, sizeof(buf)) != sizeof(buf)) {
+            perror("write failed.");
+        }
+    }
+
+    char ack[3];
+    if (!g_visca_use_udp) {
+        read(g_visca_sock, ack, 3);
+    }
+}
 #endif
 
 void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
@@ -1225,7 +1284,7 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     }
 #endif
 
-#ifdef USE_VISCA_PAN_AND_TILT
+#ifdef USE_VISCA_FOR_PAN_AND_TILT
     if (!enable_visca || g_visca_sock == -1) {
 #endif
         NDIlib_recv_ptz_pan_tilt_speed(pNDI_recv, copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
@@ -1234,7 +1293,7 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
                 fprintf(stderr, "xSpeed: %f, ySpeed; %f\n", copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
             }
         }
-#ifdef USE_VISCA_PAN_AND_TILT
+#ifdef USE_VISCA_FOR_PAN_AND_TILT
     }
 #endif
     if (copyOfMotionData.retrievePositionNumber > 0 &&
