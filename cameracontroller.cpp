@@ -1155,7 +1155,6 @@ void sendPanTiltUpdatesOverVISCA(motionData_t *motionData) {
     uint8_t pan_command = left ? 0x01 : right ? 0x02 : 0x03;
     uint8_t tilt_command = up ? 0x01 : down ? 0x02 : 0x03;
 
-    static uint32_t g_visca_sequence_number = 0;
     uint8_t buf[9] = { 0x81, 0x01, 0x06, 0x01, 0x00, 0x00, pan_command, tilt_command, 0xFF };
     int pan_level = (int)(motionData->xAxisPosition * 24.9);
     int tilt_level = (int)(motionData->yAxisPosition * 24.9);
