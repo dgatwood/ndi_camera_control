@@ -22,6 +22,7 @@
 #include <Processing.NDI.Lib.h>
 
 #define INCLUDE_VISCA
+#undef USE_VISCA_PAN_AND_TILT
 
 #ifdef __linux__
 #define USE_AVAHI
@@ -1099,7 +1100,9 @@ void sendZoomUpdatesOverVISCA(motionData_t *motionData);
 void sendPanTiltUpdatesOverVISCA(motionData_t *motionData);
 void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
     sendZoomUpdatesOverVISCA(motionData);
+#ifdef USE_VISCA_PAN_AND_TILT
     sendPanTiltUpdatesOverVISCA(motionData);
+#endif
 }
 
 static uint32_t g_visca_sequence_number = 0;
@@ -1219,14 +1222,20 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     if (!enable_visca || g_visca_sock == -1) {
 #endif
         NDIlib_recv_ptz_zoom_speed(pNDI_recv, -copyOfMotionData.zoomPosition);
+#ifdef INCLUDE_VISCA
+    }
+#endif
 
+#ifdef USE_VISCA_PAN_AND_TILT
+    if (!enable_visca || g_visca_sock == -1) {
+#endif
         NDIlib_recv_ptz_pan_tilt_speed(pNDI_recv, copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
         if (enable_verbose_debugging) {
             if (copyOfMotionData.xAxisPosition != 0 || copyOfMotionData.yAxisPosition != 0) {
                 fprintf(stderr, "xSpeed: %f, ySpeed; %f\n", copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
             }
         }
-#ifdef INCLUDE_VISCA
+#ifdef USE_VISCA_PAN_AND_TILT
     }
 #endif
     if (copyOfMotionData.retrievePositionNumber > 0 &&
