@@ -116,6 +116,10 @@ typedef struct {
     float zoomPosition;
     int storePositionNumber;    // Set button is down along with a number button (sent once/debounced).
     int retrievePositionNumber; // A number button is down by itself (sent once/debounced).
+
+    // Debounce support.
+    bool previousValue[MAX_BUTTONS + 1];  // 0 .. MAX_BUTTONS
+    int debounceCounter[MAX_BUTTONS + 1];  // 0 .. MAX_BUTTONS
 } motionData_t;
 
 enum {
@@ -174,10 +178,12 @@ static void sigint_handler(int)
 {    exit_loop = true;
 }
 
+void runUnitTests(void);
 bool configureScreen(NDIlib_video_frame_v2_t *video_recv);
 bool drawFrame(NDIlib_video_frame_v2_t *video_recv);
 void *runPTZThread(void *argIgnored);
 void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv);
+motionData_t getMotionData(void);
 void setMotionData(motionData_t newMotionData);
 uint32_t find_named_source(const NDIlib_source_t *p_sources,
                            uint32_t no_sources,
@@ -198,6 +204,7 @@ uint32_t find_named_source(const NDIlib_source_t *p_sources,
 #endif  // __linux__
 
 int main(int argc, char *argv[]) {
+    runUnitTests();
     char *stream_name = argv[argc - 1];
     if (argc < 2) {
         fprintf(stderr, "Usage: camera_control \"stream name\"\n");
@@ -1088,8 +1095,15 @@ int connectToVISCAPortWithAddress(const struct sockaddr *address) {
     return sock;
 }
 
+void sendZoomUpdatesOverVISCA(motionData_t *motionData);
+void sendPanTiltUpdatesOverVISCA(motionData_t *motionData);
 void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
-    static uint32_t sequenceNumber = 0;
+    sendZoomUpdatesOverVISCA(motionData);
+    sendPanTiltUpdatesOverVISCA(motionData);
+}
+
+static uint32_t g_visca_sequence_number = 0;
+void sendZoomUpdatesOverVISCA(motionData_t *motionData) {
     uint8_t buf[6] = { 0x81, 0x01, 0x04, 0x07, 0x00, 0xFF };
     int level = (int)(motionData->zoomPosition * 8.9);
 
@@ -1103,16 +1117,16 @@ void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
         return;
     }
     if (g_visca_use_udp) {
-        uint8_t udpbuf[14];
+        uint8_t udpbuf[sizeof(buf) + 8];
         udpbuf[0] = 0x01;
         udpbuf[1] = 0x00;
         udpbuf[2] = 0x00;
-        udpbuf[3] = 0x06;
-        udpbuf[4] = sequenceNumber >> 24;
-        udpbuf[5] = (sequenceNumber >> 16) & 0xff;
-        udpbuf[6] = (sequenceNumber >> 8) & 0xff;
-        udpbuf[7] = sequenceNumber & 0xff;
-        sequenceNumber++;
+        udpbuf[3] = sizeof(buf);
+        udpbuf[4] = g_visca_sequence_number >> 24;
+        udpbuf[5] = (g_visca_sequence_number >> 16) & 0xff;
+        udpbuf[6] = (g_visca_sequence_number >> 8) & 0xff;
+        udpbuf[7] = g_visca_sequence_number & 0xff;
+        g_visca_sequence_number++;
         bcopy(buf, udpbuf + 8, sizeof(buf));
         if (write(g_visca_sock, udpbuf, sizeof(udpbuf)) != sizeof(udpbuf)) {
             perror("write failed.");
@@ -1128,6 +1142,63 @@ void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
         read(g_visca_sock, ack, 3);
     }
 }
+
+void sendPanTiltUpdatesOverVISCA(motionData_t *motionData) {
+    bool left = motionData->xAxisPosition > 0;
+    bool right = motionData->xAxisPosition < 0;
+    bool up = motionData->yAxisPosition > 0;
+    bool down = motionData->yAxisPosition < 0;
+
+    uint8_t pan_command = left ? 0x01 : right ? 0x02 : 0x03;
+    uint8_t tilt_command = up ? 0x01 : down ? 0x02 : 0x03;
+
+    static uint32_t g_visca_sequence_number = 0;
+    uint8_t buf[9] = { 0x81, 0x01, 0x06, 0x01, 0x00, 0x00, pan_command, tilt_command, 0xFF };
+    int pan_level = (int)(motionData->xAxisPosition * 24.9);
+    int tilt_level = (int)(motionData->yAxisPosition * 24.9);
+
+    if (pan_level < 0) {  // Pan right
+        buf[4] = 0x20 | (1 - pan_level); // Pan speed
+    } else if (pan_level > 0) {
+        buf[4] = 0x30 | (pan_level - 1); // Pan speed
+    }
+
+    if (tilt_level < 0) {  // Tilt down
+        buf[5] = 0x20 | (1 - tilt_level); // Tilt speed
+    } else if (tilt_level > 0) {
+        buf[5] = 0x30 | (tilt_level - 1); // Tilt speed
+    }
+
+    if (g_visca_sock == -1) {
+        return;
+    }
+    if (g_visca_use_udp) {
+        uint8_t udpbuf[sizeof(buf) + 8];
+        udpbuf[0] = 0x01;
+        udpbuf[1] = 0x00;
+        udpbuf[2] = 0x00;
+        udpbuf[3] = sizeof(buf);
+        udpbuf[4] = g_visca_sequence_number >> 24;
+        udpbuf[5] = (g_visca_sequence_number >> 16) & 0xff;
+        udpbuf[6] = (g_visca_sequence_number >> 8) & 0xff;
+        udpbuf[7] = g_visca_sequence_number & 0xff;
+        g_visca_sequence_number++;
+        bcopy(buf, udpbuf + 8, sizeof(buf));
+        if (write(g_visca_sock, udpbuf, sizeof(udpbuf)) != sizeof(udpbuf)) {
+            perror("write failed.");
+        }
+    } else {
+        if (write(g_visca_sock, buf, sizeof(buf)) != sizeof(buf)) {
+            perror("write failed.");
+        }
+    }
+
+    char ack[3];
+    if (!g_visca_use_udp) {
+        read(g_visca_sock, ack, 3);
+    }
+}
+
 #endif
 
 void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
@@ -1149,15 +1220,15 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
 #endif
         NDIlib_recv_ptz_zoom_speed(pNDI_recv, -copyOfMotionData.zoomPosition);
 
+        NDIlib_recv_ptz_pan_tilt_speed(pNDI_recv, copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
+        if (enable_verbose_debugging) {
+            if (copyOfMotionData.xAxisPosition != 0 || copyOfMotionData.yAxisPosition != 0) {
+                fprintf(stderr, "xSpeed: %f, ySpeed; %f\n", copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
+            }
+        }
 #ifdef INCLUDE_VISCA
     }
 #endif
-    NDIlib_recv_ptz_pan_tilt_speed(pNDI_recv, copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
-    if (enable_verbose_debugging) {
-        if (copyOfMotionData.xAxisPosition != 0 || copyOfMotionData.yAxisPosition != 0) {
-            fprintf(stderr, "xSpeed: %f, ySpeed; %f\n", copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
-        }
-    }
     if (copyOfMotionData.retrievePositionNumber > 0 &&
         copyOfMotionData.retrievePositionNumber != lastMotionData.retrievePositionNumber) {
         fprintf(stderr, "Retrieving position %d\n", copyOfMotionData.retrievePositionNumber);
@@ -1257,7 +1328,8 @@ float readAxisPosition(int axis) {
  *        greatly decreases the risk of a wiring mistake causing you to draw
  *        too much current and crashing or damaging your Raspberry Pi.
  */
-bool readButton(int buttonNumber) {
+bool debounce(int buttonNumber, bool value, motionData_t *motionData);
+bool readButton(int buttonNumber, motionData_t *motionData) {
     #ifdef __linux__
 	if (!io_expander) return 0;
         int pin = pinNumberForButton(buttonNumber);
@@ -1267,8 +1339,8 @@ bool readButton(int buttonNumber) {
         if (enable_verbose_debugging) {
             fprintf(stderr, "button %d: raw: %d scaled: %s\n", buttonNumber, rawValue, value ? "true" : "false");
         }
-        return value;
     #else  // ! __linux__
+        bool value = false;
         char *filename;
         asprintf(&filename, "/var/tmp/button.%d", buttonNumber);
         FILE *fp = fopen(filename, "r");
@@ -1278,13 +1350,44 @@ bool readButton(int buttonNumber) {
             if (enable_verbose_debugging) {
                 fprintf(stderr, "Returning true for button %d\n", buttonNumber);
             }
-            return true;
+            value = true;
+        } else {
+            if (enable_verbose_debugging) {
+                fprintf(stderr, "Returning false for button %d\n", buttonNumber);
+            }
+            value = false;
         }
-        if (enable_verbose_debugging) {
-            fprintf(stderr, "Returning false for button %d\n", buttonNumber);
-        }
-        return false;
     #endif  // __linux__
+
+    return debounce(buttonNumber, value, motionData);
+}
+
+bool debounce(int buttonNumber, bool value, motionData_t *motionData) {
+    // Debounce the value.
+    const bool localDebug = false;
+    bool buttonChanged = motionData->previousValue[buttonNumber] != value;
+    if (buttonChanged && motionData->debounceCounter[buttonNumber] == 0) {
+        // If the set button changed states and it did not change states recently,
+        // keep the new state, and update the last state so that we won't print
+        // the state change message repeatedly (for debugging).
+        motionData->debounceCounter[buttonNumber] = 5;
+        if (localDebug) fprintf(stderr, "debounceCounter[%d] = 5\n", buttonNumber);
+
+        motionData->previousValue[buttonNumber] = value;
+        if (localDebug) fprintf(stderr, "previousValue[%d] = %s\n", buttonNumber, value ? "true" : "false");
+    } else if (buttonChanged) {
+        // If the set button changed states, but previously changed recently,
+        // ignore the state change for now.
+        value = motionData->previousValue[buttonNumber];
+        motionData->debounceCounter[buttonNumber]--;
+        if (localDebug) fprintf(stderr, "debounceCounter[%d] = %d\n", buttonNumber, motionData->debounceCounter[buttonNumber]);
+    } else if (motionData->debounceCounter[buttonNumber] > 0) {
+        // If the state didn't change, Just decrement the debounce counter.
+        motionData->debounceCounter[buttonNumber]--;
+        if (localDebug) fprintf(stderr, "debounceCounter[%d] = %d\n", buttonNumber, motionData->debounceCounter[buttonNumber]);
+    }
+
+    return value;
 }
 
 #ifdef __linux__
@@ -1304,24 +1407,8 @@ int pinNumberForButton(int button) {
  * updates the entire set of X/Y/Zoom/button values atomically.
  */
 void updatePTZValues() {
-    motionData_t newMotionData;
-
-#ifdef DEBUG_HACK
-    int readValues[16];
-
-    for (int i = 1; i <= 14; i++) {
-        int rawValue = input(io_expander, i, 0.001);
-        readValues[i] = rawValue - 2048;
-    }
-
-    fprintf(stderr, "    1     2     3     4     5     6     7     8     9    10    11    12    13    14\n");
-    fprintf(stderr, "%5d %5d %5d %5d %5d %5d %5d %5d %5d %5d %5d %5d %5d %5d\n",
-        readValues[1], readValues[2], readValues[3], readValues[4], readValues[5],
-        readValues[6], readValues[7], readValues[8], readValues[9], readValues[10], readValues[11],
-        readValues[12], readValues[13], readValues[14]);
-
-    return;
-#endif
+    // Copy the old data, for debounce reasons.
+    motionData_t newMotionData = getMotionData();
 
     // Update the analog axis values.
     newMotionData.xAxisPosition = readAxisPosition(kPTZAxisX);
@@ -1329,7 +1416,7 @@ void updatePTZValues() {
     newMotionData.zoomPosition = readAxisPosition(kPTZAxisZoom);
 
     // Determine whether the set button is down.
-    bool isSetButtonDown = readButton(BUTTON_SET);
+    bool isSetButtonDown = readButton(BUTTON_SET, &newMotionData);
 
     // Print a debug message when the user presses or releases the set button,
     // but only once per transition.
@@ -1361,7 +1448,7 @@ void updatePTZValues() {
      * queried above).
      */
     for (int i = 1; i <= MAX_BUTTONS; i++) {
-        if (readButton(i)) {
+        if (readButton(i, &newMotionData)) {
             if (isSetButtonDown) {
                 newMotionData.storePositionNumber = i;
             } else {
@@ -1387,6 +1474,18 @@ void setMotionData(motionData_t newMotionData) {
     pthread_mutex_lock(&g_motionMutex);
     g_motionData = newMotionData;
     pthread_mutex_unlock(&g_motionMutex);
+}
+
+motionData_t getMotionData() {
+    motionData_t newMotionData;
+    /*
+     * Lock the motion data mutex and update the motion data so that the NDI code
+     * running on the main thread can send it to the camera.
+     */
+    pthread_mutex_lock(&g_motionMutex);
+    newMotionData = g_motionData;
+    pthread_mutex_unlock(&g_motionMutex);
+    return newMotionData;
 }
 
 // Run this computation 200 times per second.  That's more than enough to update
@@ -1446,3 +1545,34 @@ void demoPTZValues(void) {
     motionData.storePositionNumber = 0; setMotionData(motionData); usleep(1000000);
 }
 #endif
+
+void testDebounce(void);
+void runUnitTests(void) {
+    testDebounce();
+}
+
+// bool debounce(int buttonNumber, bool value, motionData_t *motionData);
+void testDebounce(void) {
+    motionData_t motionData;
+    memset(&motionData, 0, sizeof(motionData));
+
+    assert(debounce(0, true, &motionData));
+    assert(debounce(0, false, &motionData));
+    assert(debounce(0, true, &motionData));
+    assert(motionData.debounceCounter[0] == 3);
+    assert(debounce(0, false, &motionData));
+    assert(debounce(0, false, &motionData));
+    assert(debounce(0, false, &motionData));
+    assert(!debounce(0, false, &motionData));
+    assert(!debounce(0, true, &motionData));
+    assert(!debounce(0, false, &motionData));
+    assert(motionData.debounceCounter[0] == 3);
+    assert(!debounce(0, true, &motionData));
+    assert(!debounce(0, true, &motionData));
+    assert(!debounce(0, true, &motionData));
+    assert(debounce(1, true, &motionData));
+    assert(!debounce(0, false, &motionData));
+    assert(debounce(0, true, &motionData));
+    assert(motionData.debounceCounter[1] == 5);
+
+}
