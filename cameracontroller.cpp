@@ -22,7 +22,7 @@
 #include <Processing.NDI.Lib.h>
 
 #define INCLUDE_VISCA
-#undef USE_VISCA_FOR_PAN_AND_TILT
+#define USE_VISCA_FOR_PAN_AND_TILT
 #undef USE_VISCA_FOR_EXPOSURE_COMPENSATION
 
 #ifdef __linux__
@@ -193,6 +193,7 @@ uint32_t find_named_source(const NDIlib_source_t *p_sources,
                            uint32_t no_sources,
                            char *stream_name,
                            bool use_fallback);
+char *fmtbuf(uint8_t *buf, ssize_t size);
 
 #ifdef INCLUDE_VISCA
     bool connectVISCA(char *stream_name);
@@ -435,13 +436,15 @@ int main(int argc, char *argv[]) {
 #endif
                ) {
 #ifdef USE_AVAHI
-                if (avahi_simple_poll_iterate(g_avahi_simple_poll, 0) != 0) {
-                    // Something went horribly wrong.  Just null out the references and start over.
-                    g_avahi_simple_poll = NULL;
-                    g_avahi_client = NULL;
-                    g_avahi_service_browser = NULL;
-
-                    enable_visca = connectVISCA(stream_name);
+                if (enable_visca) {
+                    if (avahi_simple_poll_iterate(g_avahi_simple_poll, 0) != 0) {
+                        // Something went horribly wrong.  Just null out the references and start over.
+                        g_avahi_simple_poll = NULL;
+                        g_avahi_client = NULL;
+                        g_avahi_service_browser = NULL;
+    
+                        enable_visca = connectVISCA(stream_name);
+                    }
                 }
 #else
                 if (g_browseRef != NULL) {
@@ -1125,11 +1128,13 @@ void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
     sendPanTiltUpdatesOverVISCA(motionData);
 #endif
 #ifdef USE_VISCA_FOR_EXPOSURE_COMPENSATION
-    sendExposureCompensationOverVISCA(void);
+    sendExposureCompensationOverVISCA();
 #endif
 }
 
 static uint32_t g_visca_sequence_number = 0;
+void send_visca_packet(uint8_t *buf, ssize_t bufsize, int timeout_usec);
+
 void sendZoomUpdatesOverVISCA(motionData_t *motionData) {
     uint8_t buf[6] = { 0x81, 0x01, 0x04, 0x07, 0x00, 0xFF };
     int level = (int)(motionData->zoomPosition * 8.9);
@@ -1140,34 +1145,7 @@ void sendZoomUpdatesOverVISCA(motionData_t *motionData) {
         buf[4] = 0x30 | (level - 1);
     }
 
-    if (g_visca_sock == -1) {
-        return;
-    }
-    if (g_visca_use_udp) {
-        uint8_t udpbuf[sizeof(buf) + 8];
-        udpbuf[0] = 0x01;
-        udpbuf[1] = 0x00;
-        udpbuf[2] = 0x00;
-        udpbuf[3] = sizeof(buf);
-        udpbuf[4] = g_visca_sequence_number >> 24;
-        udpbuf[5] = (g_visca_sequence_number >> 16) & 0xff;
-        udpbuf[6] = (g_visca_sequence_number >> 8) & 0xff;
-        udpbuf[7] = g_visca_sequence_number & 0xff;
-        g_visca_sequence_number++;
-        bcopy(buf, udpbuf + 8, sizeof(buf));
-        if (write(g_visca_sock, udpbuf, sizeof(udpbuf)) != sizeof(udpbuf)) {
-            perror("write failed.");
-        }
-    } else {
-        if (write(g_visca_sock, buf, sizeof(buf)) != sizeof(buf)) {
-            perror("write failed.");
-        }
-    }
-
-    char ack[3];
-    if (!g_visca_use_udp) {
-        read(g_visca_sock, ack, 3);
-    }
+    send_visca_packet(buf, sizeof(buf), 100000);
 }
 
 void sendPanTiltUpdatesOverVISCA(motionData_t *motionData) {
@@ -1184,73 +1162,88 @@ void sendPanTiltUpdatesOverVISCA(motionData_t *motionData) {
 
     uint8_t buf[9] = { 0x81, 0x01, 0x06, 0x01, 0x00, 0x00, pan_command, tilt_command, 0xFF };
 
-    buf[4] = abs(pan_level); // Pan speed: 0 to 24 (0x18)
-    buf[5] = abs(tilt_level); // Pan speed: 0 to 24 (0x18)
+    buf[4] = abs(pan_level) ?: 1; // Pan speed: 1 to 24 (0x18)
+    buf[5] = abs(tilt_level) ?: 1; // Pan speed: 1 to 24 (0x18)
 
-    if (g_visca_sock == -1) {
-        return;
-    }
-    if (g_visca_use_udp) {
-        uint8_t udpbuf[sizeof(buf) + 8];
-        udpbuf[0] = 0x01;
-        udpbuf[1] = 0x00;
-        udpbuf[2] = 0x00;
-        udpbuf[3] = sizeof(buf);
-        udpbuf[4] = g_visca_sequence_number >> 24;
-        udpbuf[5] = (g_visca_sequence_number >> 16) & 0xff;
-        udpbuf[6] = (g_visca_sequence_number >> 8) & 0xff;
-        udpbuf[7] = g_visca_sequence_number & 0xff;
-        g_visca_sequence_number++;
-        bcopy(buf, udpbuf + 8, sizeof(buf));
-        if (write(g_visca_sock, udpbuf, sizeof(udpbuf)) != sizeof(udpbuf)) {
-            perror("write failed.");
-        }
-    } else {
-        if (write(g_visca_sock, buf, sizeof(buf)) != sizeof(buf)) {
-            perror("write failed.");
-        }
-    }
-
-    char ack[3];
-    if (!g_visca_use_udp) {
-        read(g_visca_sock, ack, 3);
-    }
+    send_visca_packet(buf, sizeof(buf), 100000);
 }
 
 void sendExposureCompensationOverVISCA(void) {
+    if (g_exposure_compensation == 0) { return; }  // Don't bother.
+
     uint8_t exposure_compensation_scaled = (uint8_t)(g_exposure_compensation + 5); // Range now 0 to 10
     uint8_t buf[9] = { 0x81, 0x01, 0x04, 0x4E, 0x00, 0x00, (uint8_t)((exposure_compensation_scaled >> 4) & 0xf),
                        (uint8_t)(exposure_compensation_scaled & 0xf), 0xFF };
 
+    send_visca_packet(buf, sizeof(buf), 100000);
+}
+
+uint8_t get_ack(int sock, int timeout_usec);
+
+void send_visca_packet(uint8_t *buf, ssize_t bufsize, int timeout_usec) {
     if (g_visca_sock == -1) {
         return;
     }
+
     if (g_visca_use_udp) {
-        uint8_t udpbuf[sizeof(buf) + 8];
+        ssize_t udpbufsize = bufsize + 8;
+        uint8_t *udpbuf = (uint8_t *)malloc(udpbufsize);
         udpbuf[0] = 0x01;
         udpbuf[1] = 0x00;
         udpbuf[2] = 0x00;
-        udpbuf[3] = sizeof(buf);
+        udpbuf[3] = bufsize;
         udpbuf[4] = g_visca_sequence_number >> 24;
         udpbuf[5] = (g_visca_sequence_number >> 16) & 0xff;
         udpbuf[6] = (g_visca_sequence_number >> 8) & 0xff;
         udpbuf[7] = g_visca_sequence_number & 0xff;
         g_visca_sequence_number++;
-        bcopy(buf, udpbuf + 8, sizeof(buf));
-        if (write(g_visca_sock, udpbuf, sizeof(udpbuf)) != sizeof(udpbuf)) {
+        bcopy(buf, udpbuf + 8, bufsize);
+        if (write(g_visca_sock, udpbuf, udpbufsize) != udpbufsize) {
             perror("write failed.");
         }
+        if (enable_verbose_debugging) fprintf(stderr, "Sent %s\n", fmtbuf(udpbuf, bufsize + 8));
+        free(udpbuf);
     } else {
-        if (write(g_visca_sock, buf, sizeof(buf)) != sizeof(buf)) {
+        if (write(g_visca_sock, buf, bufsize) != bufsize) {
             perror("write failed.");
         }
     }
 
-    char ack[3];
-    if (!g_visca_use_udp) {
-        read(g_visca_sock, ack, 3);
+    uint8_t ack = get_ack(g_visca_sock, timeout_usec);
+    if (ack == 5) return;
+    else if (ack == 4) get_ack(g_visca_sock, timeout_usec);
+    if (ack != 5) {
+        fprintf(stderr, "Unexpected ack: %d\n", ack);
     }
 }
+
+uint8_t get_ack(int sock, int timeout_usec) {
+    char ack[3];
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(g_visca_sock, &readfds);
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = timeout_usec;
+    if (select(g_visca_sock + 1, &readfds, NULL, NULL, &tv) > 0) {
+        read(g_visca_sock, ack, 3);
+    } else {
+        fprintf(stderr, "Timed out waiting for ack\n", ack[0]);
+        return -1;
+    }
+    if (ack[0] != 0x90) {
+        fprintf(stderr, "Unexpected ack address 0x%02x\n", ack[0]);
+    }
+    uint8_t ack_type = ack[1] >> 4;
+    if (ack_type != 4 && ack_type != 5) {
+        fprintf(stderr, "Unexpected ack type 0x%02x\n", ack[1]);
+    }
+    if (ack[2] != 0xff) {
+        fprintf(stderr, "Unexpected ack trailer 0x%02x\n", ack[2]);
+    }
+    return ack_type;
+}
+
 #endif
 
 void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
@@ -1603,6 +1596,27 @@ void demoPTZValues(void) {
     motionData.storePositionNumber = 0; setMotionData(motionData); usleep(1000000);
 }
 #endif
+
+char fmtnibble(uint8_t nibble) {
+    if (nibble <= 9) return '0' + nibble;
+    return 'A' - 10 + nibble;
+}
+
+char *fmtbuf(uint8_t *buf, ssize_t bufsize) {
+    static char *retval = NULL;
+    if (retval != NULL) {
+        free(retval);
+        retval = NULL;
+    }
+    retval = (char *)malloc(bufsize * 3);
+    for (ssize_t i = 0 ; i < bufsize; i++) {
+        retval[i * 3] = fmtnibble(buf[i] >> 4);
+        retval[(i * 3) + 1] = fmtnibble(buf[i] & 0xf);
+        retval[(i * 3) + 2] = ' ';
+    }
+    retval[(bufsize * 3) - 1] = '\0';
+    return retval;
+}
 
 void testDebounce(void);
 void runUnitTests(void) {
