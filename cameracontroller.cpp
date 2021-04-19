@@ -23,7 +23,7 @@
 
 #define INCLUDE_VISCA
 #define USE_VISCA_FOR_PAN_AND_TILT
-#undef USE_VISCA_FOR_EXPOSURE_COMPENSATION
+#define USE_VISCA_FOR_EXPOSURE_COMPENSATION
 
 #ifdef __linux__
 #define USE_AVAHI
@@ -153,6 +153,7 @@ enum {
 
 bool g_ptzEnabled = false;
 
+bool g_set_exposure_compensation = false;
 int8_t g_exposure_compensation = 0;
 
 #ifdef INCLUDE_VISCA
@@ -243,12 +244,14 @@ int main(int argc, char *argv[]) {
         // and shutter speed.  Ugh.
         if (!strcmp(argv[i], "-e") || !strcmp(argv[i], "--exposure_compensation")) {
             if (argc > i + 1) {
-              g_exposure_compensation = atoi(argv[i+1]);
-              i++;
+                g_exposure_compensation = atoi(argv[i+1]);
+                g_set_exposure_compensation = true;
+                i++;
             }
             if (g_exposure_compensation > 5 || g_exposure_compensation < -5) {
                 fprintf(stderr, "Invalid exposure compentation %d.  (Valid range: -5 to 5)\n", g_exposure_compensation);
                 g_exposure_compensation = 0;
+                g_set_exposure_compensation = false;
             } else {
                 fprintf(stderr, "Set exposure compentation to %d.\n", g_exposure_compensation);
             }
@@ -1169,13 +1172,19 @@ void sendPanTiltUpdatesOverVISCA(motionData_t *motionData) {
 }
 
 void sendExposureCompensationOverVISCA(void) {
-    if (g_exposure_compensation == 0) { return; }  // Don't bother.
+    if (!g_set_exposure_compensation) { return; }
 
-    uint8_t exposure_compensation_scaled = (uint8_t)(g_exposure_compensation + 5); // Range now 0 to 10
-    uint8_t buf[9] = { 0x81, 0x01, 0x04, 0x4E, 0x00, 0x00, (uint8_t)((exposure_compensation_scaled >> 4) & 0xf),
-                       (uint8_t)(exposure_compensation_scaled & 0xf), 0xFF };
+    // Enable exposure compensation.
+    uint8_t enablebuf[6] = { 0x81, 0x01, 0x04, 0x3E, (uint8_t)(g_exposure_compensation == 0 ? 0x03 : 0x02), 0xFF };
+    send_visca_packet(enablebuf, sizeof(enablebuf), 100000);
 
-    send_visca_packet(buf, sizeof(buf), 100000);
+    // Set compensation amount.
+    if (g_exposure_compensation != 0) {
+        uint8_t exposure_compensation_scaled = (uint8_t)(g_exposure_compensation + 5); // Range now 0 to 10
+        uint8_t buf[9] = { 0x81, 0x01, 0x04, 0x4E, 0x00, 0x00, (uint8_t)((exposure_compensation_scaled >> 4) & 0xf),
+                           (uint8_t)(exposure_compensation_scaled & 0xf), 0xFF };
+        send_visca_packet(buf, sizeof(buf), 100000);
+    }
 }
 
 uint8_t get_ack(int sock, int timeout_usec);
@@ -1201,7 +1210,9 @@ void send_visca_packet(uint8_t *buf, ssize_t bufsize, int timeout_usec) {
         if (write(g_visca_sock, udpbuf, udpbufsize) != udpbufsize) {
             perror("write failed.");
         }
-        if (enable_verbose_debugging) fprintf(stderr, "Sent %s\n", fmtbuf(udpbuf, bufsize + 8));
+        if (enable_verbose_debugging) {
+            fprintf(stderr, "Sent %s\n", fmtbuf(udpbuf, bufsize + 8));
+        }
         free(udpbuf);
     } else {
         if (write(g_visca_sock, buf, bufsize) != bufsize) {
@@ -1212,7 +1223,7 @@ void send_visca_packet(uint8_t *buf, ssize_t bufsize, int timeout_usec) {
     uint8_t ack = get_ack(g_visca_sock, timeout_usec);
     if (ack == 5) return;
     else if (ack == 4) get_ack(g_visca_sock, timeout_usec);
-    if (ack != 5) {
+    if (ack != 5 && enable_verbose_debugging) {
         fprintf(stderr, "Unexpected ack: %d\n", ack);
     }
 }
@@ -1227,18 +1238,18 @@ uint8_t get_ack(int sock, int timeout_usec) {
     tv.tv_usec = timeout_usec;
     if (select(g_visca_sock + 1, &readfds, NULL, NULL, &tv) > 0) {
         read(g_visca_sock, ack, 3);
-    } else {
+    } else if (enable_verbose_debugging) {
         fprintf(stderr, "Timed out waiting for ack\n", ack[0]);
         return -1;
     }
-    if (ack[0] != 0x90) {
+    if (ack[0] != 0x90 && enable_verbose_debugging) {
         fprintf(stderr, "Unexpected ack address 0x%02x\n", ack[0]);
     }
     uint8_t ack_type = ack[1] >> 4;
-    if (ack_type != 4 && ack_type != 5) {
+    if (ack_type != 4 && ack_type != 5 && enable_verbose_debugging) {
         fprintf(stderr, "Unexpected ack type 0x%02x\n", ack[1]);
     }
-    if (ack[2] != 0xff) {
+    if (ack[2] != 0xff && enable_verbose_debugging) {
         fprintf(stderr, "Unexpected ack trailer 0x%02x\n", ack[2]);
     }
     return ack_type;
