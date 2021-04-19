@@ -86,6 +86,12 @@ bool use_low_res_preview = false;
 /* Enable debugging (controlled by the -d / --debug flag). */
 bool enable_debugging = false;
 
+/* Enable PTZ debugging (controlled by the -P / --ptzdebug flag). */
+bool enable_ptz_debugging = false;
+
+/* Enable debugging (controlled by the -B / --buttondebug flag). */
+bool enable_button_debugging = false;
+
 /* Enable debugging (controlled by the -v / --verbose flag). */
 bool enable_verbose_debugging = false;
 
@@ -222,6 +228,14 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Enabling debugging (slow).\n");
             enable_debugging = true;
         }
+        if (!strcmp(argv[i], "-B") || !strcmp(argv[i], "--buttondebug")) {
+            fprintf(stderr, "Enabling PTZ debugging.\n");
+            enable_button_debugging = true;
+        }
+        if (!strcmp(argv[i], "-P") || !strcmp(argv[i], "--ptzdebug")) {
+            fprintf(stderr, "Enabling PTZ debugging.\n");
+            enable_ptz_debugging = true;
+        }
         if (!strcmp(argv[i], "-v") || !strcmp(argv[i], "--verbose")) {
             fprintf(stderr, "Enabling verbose debugging (slow).\n");
             enable_verbose_debugging = true;
@@ -351,6 +365,8 @@ int main(int argc, char *argv[]) {
         const NDIlib_source_t *p_sources = NULL;
         int source_number = -1;
         while (!exit_loop && source_number == -1) {
+            if (enable_debugging) fprintf(stderr, "Waiting for source.\n");
+
             // Wait until the sources on the network have changed
             p_NDILib->NDIlib_find_wait_for_sources(pNDI_find, 1000000);
             p_sources = p_NDILib->NDIlib_find_get_current_sources(pNDI_find, &no_sources);
@@ -672,12 +688,12 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
             return false;
         }
         if (g_xScaleFactor == 1.0 && g_yScaleFactor == 1.0 && monitor_bytes_per_pixel == 4 && !force_slow_path) {
-            if (enable_debugging) {
+            if (enable_verbose_debugging) {
                 fprintf(stderr, "fastpath\n");
             }
             bcopy(video_recv->p_data, g_framebufferBase, (video_recv->xres * video_recv->yres * 4));
         } else {
-            if (enable_debugging) {
+            if (enable_verbose_debugging) {
                 fprintf(stderr, "slowpath (%f / %f)\n", g_xScaleFactor, g_yScaleFactor);
             }
             uint32_t *inBuf = (uint32_t *)video_recv->p_data;
@@ -1266,8 +1282,8 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     // the value that we send to the rest of the app.
     static motionData_t lastMotionData = { 0.0, 0.0, 0.0, 0, 0 };
 
-    if (enable_verbose_debugging && copyOfMotionData.zoomPosition != 0) {
-        fprintf(stderr, "zSpeed: %f\n", copyOfMotionData.zoomPosition);
+    if (enable_ptz_debugging && copyOfMotionData.zoomPosition != 0) {
+        fprintf(stderr, "zSpeed: %f ", copyOfMotionData.zoomPosition);
     }
 
 #ifdef INCLUDE_VISCA
@@ -1282,9 +1298,9 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     if (!enable_visca || g_visca_sock == -1) {
 #endif
         NDIlib_recv_ptz_pan_tilt_speed(pNDI_recv, copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
-        if (enable_verbose_debugging) {
+        if (enable_ptz_debugging) {
             if (copyOfMotionData.xAxisPosition != 0 || copyOfMotionData.yAxisPosition != 0) {
-                fprintf(stderr, "xSpeed: %f, ySpeed; %f\n", copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
+                fprintf(stderr, "xSpeed: %f, ySpeed; %f ", copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
             }
         }
 #ifdef USE_VISCA_FOR_PAN_AND_TILT
@@ -1347,8 +1363,8 @@ float readAxisPosition(int axis) {
         }
         if (value > -0.05 && value < 0.05) { value = 0; }  // Keep the center stable.
 
-        if (enable_verbose_debugging) {
-            fprintf(stderr, "axis %d: raw: %d scaled: %f\n", axis, rawValue, value);
+        if (enable_ptz_debugging) {
+            fprintf(stderr, "axis %d: raw: %d scaled: %f ", axis, rawValue, value);
         }
         return value;
     #else  // ! __linux__
@@ -1360,7 +1376,7 @@ float readAxisPosition(int axis) {
         if (fp) {
             fscanf(fp, "%f\n", &value);
             fclose(fp);
-            if (enable_verbose_debugging) {
+            if (enable_ptz_debugging) {
                 fprintf(stderr, "Returning %f for axis %d\n", value, axis);
             }
             return value;
@@ -1397,7 +1413,7 @@ bool readButton(int buttonNumber, motionData_t *motionData) {
         int rawValue = input(io_expander, pin, 0.001);
         bool value = (rawValue == LOW);  // If logic low (grounded), return true.
 
-        if (enable_verbose_debugging) {
+        if (enable_button_debugging) {
             fprintf(stderr, "button %d: raw: %d scaled: %s\n", buttonNumber, rawValue, value ? "true" : "false");
         }
     #else  // ! __linux__
@@ -1408,12 +1424,12 @@ bool readButton(int buttonNumber, motionData_t *motionData) {
         free(filename);
         if (fp) {
             fclose(fp);
-            if (enable_verbose_debugging) {
+            if (enable_button_debugging) {
                 fprintf(stderr, "Returning true for button %d\n", buttonNumber);
             }
             value = true;
         } else {
-            if (enable_verbose_debugging) {
+            if (enable_button_debugging) {
                 fprintf(stderr, "Returning false for button %d\n", buttonNumber);
             }
             value = false;
@@ -1475,6 +1491,9 @@ void updatePTZValues() {
     newMotionData.xAxisPosition = readAxisPosition(kPTZAxisX);
     newMotionData.yAxisPosition = readAxisPosition(kPTZAxisY);
     newMotionData.zoomPosition = readAxisPosition(kPTZAxisZoom);
+    if (enable_ptz_debugging) {
+        fprintf(stderr, "\n");
+    }
 
     // Determine whether the set button is down.
     bool isSetButtonDown = readButton(BUTTON_SET, &newMotionData);
