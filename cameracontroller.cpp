@@ -1172,7 +1172,7 @@ void sendZoomUpdatesOverVISCA(motionData_t *motionData) {
 
 void sendPanTiltUpdatesOverVISCA(motionData_t *motionData) {
     int pan_level = (int)(motionData->xAxisPosition * 24.9);
-    int tilt_level = (int)(motionData->yAxisPosition * 24.9);
+    int tilt_level = (int)(motionData->yAxisPosition * 23.9);
 
     bool left = pan_level > 0;
     bool right = pan_level < 0;
@@ -1184,17 +1184,8 @@ void sendPanTiltUpdatesOverVISCA(motionData_t *motionData) {
 
     uint8_t buf[9] = { 0x81, 0x01, 0x06, 0x01, 0x00, 0x00, pan_command, tilt_command, 0xFF };
 
-    if (pan_level < 0) {  // Pan right
-        buf[4] = (pan_level - 1); // Pan speed: 0 to -24
-    } else if (pan_level > 0) {
-        buf[4] = (pan_level + 1); // Pan speed: 0 to 24
-    }
-
-    if (tilt_level < 0) {  // Tilt down
-        buf[5] = (1 - tilt_level); // Tilt speed: 0 to -24
-    } else if (tilt_level > 0) {
-        buf[5] = (tilt_level - 1); // Tilt speed: 0 to 24
-    }
+    buf[4] = abs(pan_level); // Pan speed: 0 to 24 (0x18)
+    buf[5] = abs(tilt_level); // Pan speed: 0 to 24 (0x18)
 
     if (g_visca_sock == -1) {
         return;
