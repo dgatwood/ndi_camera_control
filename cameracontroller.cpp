@@ -1142,11 +1142,10 @@ void sendZoomUpdatesOverVISCA(motionData_t *motionData) {
     uint8_t buf[6] = { 0x81, 0x01, 0x04, 0x07, 0x00, 0xFF };
     int level = (int)(motionData->zoomPosition * 8.9);
 
-    if (level < 0) {  // Zoom in
-        buf[4] = 0x20 | (1 - level);
-    } else if (level > 0) {
-        buf[4] = 0x30 | (level - 1);
+    if (level != 0) {
+        buf[4] = (abs(level) - 1) | (level < 0 ? 0x20 : 0x30);
     }
+    fprintf(stderr, "zoom speed: %d buf: 0x%02x\n", level, buf[4]);
 
     send_visca_packet(buf, sizeof(buf), 100000);
 }
