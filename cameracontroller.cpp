@@ -159,8 +159,88 @@ enum {
 
 bool g_ptzEnabled = false;
 
+bool g_set_auto_exposure = false;
+
 bool g_set_exposure_compensation = false;
 int8_t g_exposure_compensation = 0;
+
+bool g_set_manual_iris = false;
+int8_t g_manual_iris = 0;
+
+bool g_set_manual_gain = false;
+int8_t g_manual_gain = 0;
+
+bool g_set_manual_shutter = false;
+int8_t g_manual_shutter = 0;
+
+ 
+// Specs are for Marshall cameras.  Other cameras may differ.
+// Shutter Speed | 60/30fps | 50/25fps
+// --------------|----------|---------
+// 0             | 1/10000  | 1/10000
+// 1             | 1/5000   | 1/5000
+// 2             | 1/3000   | 1/3000
+// 3             | 1/2500   | 1/2500
+// 4             | 1/2000   | 1/1750
+// 5             | 1/1500   | 1/1250
+// 6             | 1/1000   | 1/1000
+// 7             | 1/725    | 1/600
+// 8             | 1/500    | 1/425
+// 9             | 1/350    | 1/300
+// 10            | 1/250    | 1/215
+// 11            | 1/180    | 1/150
+// 12            | 1/120    | 1/120
+// 13            | 1/100    | 1/100
+// 14            | 1/90     | 1/75
+// 15            | 1/60     | 1/50
+// 16            | 1/30     | 1/25
+// 17            | 1/15     | 1/12
+// 18            | 1/8      | 1/6
+// 19            | 1/4      | 1/3
+// 20            | 1/2      | 1/2
+// 21            | 1/1      | 1/1
+
+
+// Specs are for Marshall cameras.  Other cameras may differ (or even be backwards).
+// Gain | Value
+// -----|-------
+// 15   | +45 dB
+// 14   | +42 dB
+// 13   | +39 dB
+// 12   | +36 dB
+// 11   | +33 dB
+// 10   | +30 dB
+// 9    | +27 dB
+// 8    | +24 dB
+// 7    | +21 dB
+// 6    | +18 dB
+// 5    | +15 dB
+// 4    | +12 dB
+// 3    | +9 dB
+// 2    | +6 dB
+// 1    | +3 dB
+// 0    | 0 dB
+
+
+// Specs are for Marshall cameras.  Other cameras may differ.
+// Iris | Value
+// -----|------
+// 15   | Close
+// 14   | F1.6
+// 13   | F2
+// 12   | F2.2
+// 11   | F2.7
+// 10   | F3.2
+// 9    | F3.8
+// 8    | F4.5
+// 7    | F5.4
+// 6    | F6.3
+// 5    | F7.8
+// 4    | F9
+// 3    | F11
+// 2    | F13
+// 1    | F16
+// 0    | F18
 
 #ifdef INCLUDE_VISCA
     int g_visca_sock = -1;
@@ -268,6 +348,54 @@ int main(int argc, char *argv[]) {
                 g_set_exposure_compensation = false;
             } else {
                 fprintf(stderr, "Set exposure compentation to %d.\n", g_exposure_compensation);
+            }
+        }
+
+        if (!strcmp(argv[i], "-a") || !strcmp(argv[i], "--auto_exposure")) {
+            g_set_auto_exposure = true;
+        }
+        if (!strcmp(argv[i], "-i") || !strcmp(argv[i], "--iris")) {
+            if (argc > i + 1) {
+                g_manual_iris = atoi(argv[i+1]);
+                g_set_manual_iris = true;
+                i++;
+            }
+            if (g_manual_iris > 21 || g_manual_iris < 0) {
+                fprintf(stderr, "Invalid manual iris %d.  (Valid range: 0 to 21)\n", g_manual_iris);
+                g_manual_iris = 0;
+                g_set_manual_iris = false;
+            } else {
+                fprintf(stderr, "Set manual iris to %d.\n", g_exposure_compensation);
+            }
+        }
+
+        if (!strcmp(argv[i], "-g") || !strcmp(argv[i], "--gain")) {
+            if (argc > i + 1) {
+                g_manual_gain = atoi(argv[i+1]);
+                g_set_manual_gain = true;
+                i++;
+            }
+            if (g_manual_gain > 15 || g_manual_gain < 0) {
+                fprintf(stderr, "Invalid manual gain %d.  (Valid range: 0 to 15)\n", g_manual_gain);
+                g_manual_gain = 0;
+                g_set_manual_gain = false;
+            } else {
+                fprintf(stderr, "Set manual iris to %d.\n", g_exposure_compensation);
+            }
+        }
+
+        if (!strcmp(argv[i], "-s") || !strcmp(argv[i], "--shutter")) {
+            if (argc > i + 1) {
+                g_manual_shutter = atoi(argv[i+1]);
+                g_set_manual_shutter = true;
+                i++;
+            }
+            if (g_manual_shutter > 21 || g_manual_shutter < 0) {
+                fprintf(stderr, "Invalid manual shutter %d.  (Valid range: 0 to 21)\n", g_manual_shutter);
+                g_manual_shutter = 0;
+                g_set_manual_shutter = false;
+            } else {
+                fprintf(stderr, "Set manual iris to %d.\n", g_exposure_compensation);
             }
         }
 #endif
@@ -1140,6 +1268,7 @@ int connectToVISCAPortWithAddress(const struct sockaddr *address) {
 void sendZoomUpdatesOverVISCA(motionData_t *motionData);
 void sendPanTiltUpdatesOverVISCA(motionData_t *motionData);
 void sendExposureCompensationOverVISCA(void);
+void sendManualExposureOverVISCA(void);
 
 void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
     sendZoomUpdatesOverVISCA(motionData);
@@ -1148,6 +1277,7 @@ void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
 #endif
 #ifdef USE_VISCA_FOR_EXPOSURE_COMPENSATION
     sendExposureCompensationOverVISCA();
+    sendManualExposureOverVISCA();
 #endif
 }
 
@@ -1184,6 +1314,42 @@ void sendPanTiltUpdatesOverVISCA(motionData_t *motionData) {
     buf[5] = abs(tilt_level) ?: 1; // Pan speed: 1 to 24 (0x18)
 
     send_visca_packet(buf, sizeof(buf), 100000);
+}
+
+void sendManualExposureOverVISCA(void) {
+    if (g_set_auto_exposure) {
+        if (enable_ptz_debugging || 1) fprintf(stderr, "Enabling automatic exposure.\n");
+        uint8_t disablebuf[6] = { 0x81, 0x01, 0x04, 0x39, 0x00, 0xFF };
+        send_visca_packet(disablebuf, sizeof(disablebuf), 100000);
+        return;
+    } else if (!(g_set_manual_iris || g_set_manual_gain || g_set_manual_gain)) {
+        return;
+    }
+
+    if (enable_ptz_debugging || 1) fprintf(stderr, "Enabling manual exposure.\n");
+    uint8_t enablebuf[6] = { 0x81, 0x01, 0x04, 0x39, 0x03, 0xFF };
+    send_visca_packet(enablebuf, sizeof(enablebuf), 100000);
+
+    if (g_set_manual_iris) {
+        if (enable_ptz_debugging || 1) fprintf(stderr, "Setting iris position.\n");
+        uint8_t irisbuf[9] = { 0x81, 0x01, 0x04, 0x4B, 0x00, 0x00,
+                               (uint8_t)(g_manual_iris >> 4), (uint8_t)(g_manual_iris & 0xF), 0xFF };
+        send_visca_packet(irisbuf, sizeof(irisbuf), 100000);
+    }
+
+    if (g_set_manual_gain) {
+        if (enable_ptz_debugging || 1) fprintf(stderr, "Setting gain position.\n");
+        uint8_t gainbuf[9] = { 0x81, 0x01, 0x04, 0x4C, 0x00, 0x00,
+                               (uint8_t)(g_manual_gain >> 4), (uint8_t)(g_manual_gain & 0xF), 0xFF };
+        send_visca_packet(gainbuf, sizeof(gainbuf), 100000);
+    }
+
+    if (g_set_manual_gain) {
+        if (enable_ptz_debugging || 1) fprintf(stderr, "Setting gain position.\n");
+        uint8_t gainbuf[9] = { 0x81, 0x01, 0x04, 0x4A, 0x00, 0x00,
+                               (uint8_t)(g_manual_gain >> 4), (uint8_t)(g_manual_gain & 0xF), 0xFF };
+        send_visca_packet(gainbuf, sizeof(gainbuf), 100000);
+    }
 }
 
 void sendExposureCompensationOverVISCA(void) {
