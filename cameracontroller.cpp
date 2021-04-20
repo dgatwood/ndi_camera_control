@@ -1410,7 +1410,7 @@ void send_visca_packet(uint8_t *buf, ssize_t bufsize, int timeout_usec) {
 }
 
 uint8_t get_ack(int sock, int timeout_usec) {
-    char ack[3];
+    unsigned char ack[3];
     fd_set readfds;
     FD_ZERO(&readfds);
     FD_SET(g_visca_sock, &readfds);
@@ -1420,7 +1420,7 @@ uint8_t get_ack(int sock, int timeout_usec) {
     if (select(g_visca_sock + 1, &readfds, NULL, NULL, &tv) > 0) {
         read(g_visca_sock, ack, 3);
     } else if (enable_verbose_debugging) {
-        fprintf(stderr, "Timed out waiting for ack\n", ack[0]);
+        fprintf(stderr, "Timed out waiting for ack\n");
         return -1;
     }
     if (ack[0] != 0x90 && enable_verbose_debugging) {
@@ -1571,7 +1571,7 @@ float readAxisPosition(int axis) {
  *        greatly decreases the risk of a wiring mistake causing you to draw
  *        too much current and crashing or damaging your Raspberry Pi.
  */
-bool debounce(int buttonNumber, bool value, motionData_t *motionData);
+bool debounce(int buttonNumber, bool value, motionData_t *motionData, int debounceCount);
 bool readButton(int buttonNumber, motionData_t *motionData) {
     #ifdef __linux__
 	if (!io_expander) return 0;
@@ -1602,10 +1602,10 @@ bool readButton(int buttonNumber, motionData_t *motionData) {
         }
     #endif  // __linux__
 
-    return debounce(buttonNumber, value, motionData);
+    return debounce(buttonNumber, value, motionData, 20);
 }
 
-bool debounce(int buttonNumber, bool value, motionData_t *motionData) {
+bool debounce(int buttonNumber, bool value, motionData_t *motionData, int debounceCount) {
     // Debounce the value.
     const bool localDebug = false;
     bool buttonChanged = motionData->previousValue[buttonNumber] != value;
@@ -1613,8 +1613,8 @@ bool debounce(int buttonNumber, bool value, motionData_t *motionData) {
         // If the set button changed states and it did not change states recently,
         // keep the new state, and update the last state so that we won't print
         // the state change message repeatedly (for debugging).
-        motionData->debounceCounter[buttonNumber] = 5;
-        if (localDebug) fprintf(stderr, "debounceCounter[%d] = 5\n", buttonNumber);
+        motionData->debounceCounter[buttonNumber] = debounceCount;
+        if (localDebug) fprintf(stderr, "debounceCounter[%d] = %d\n", buttonNumber, debounceCount);
 
         motionData->previousValue[buttonNumber] = value;
         if (localDebug) fprintf(stderr, "previousValue[%d] = %s\n", buttonNumber, value ? "true" : "false");
@@ -1818,28 +1818,28 @@ void runUnitTests(void) {
     testDebounce();
 }
 
-// bool debounce(int buttonNumber, bool value, motionData_t *motionData);
+// bool debounce(int buttonNumber, bool value, motionData_t *motionData, int debounceCount);
 void testDebounce(void) {
     motionData_t motionData;
     memset(&motionData, 0, sizeof(motionData));
 
-    assert(debounce(0, true, &motionData));
-    assert(debounce(0, false, &motionData));
-    assert(debounce(0, true, &motionData));
+    assert(debounce(0, true, &motionData, 5));
+    assert(debounce(0, false, &motionData, 5));
+    assert(debounce(0, true, &motionData, 5));
     assert(motionData.debounceCounter[0] == 3);
-    assert(debounce(0, false, &motionData));
-    assert(debounce(0, false, &motionData));
-    assert(debounce(0, false, &motionData));
-    assert(!debounce(0, false, &motionData));
-    assert(!debounce(0, true, &motionData));
-    assert(!debounce(0, false, &motionData));
+    assert(debounce(0, false, &motionData, 5));
+    assert(debounce(0, false, &motionData, 5));
+    assert(debounce(0, false, &motionData, 5));
+    assert(!debounce(0, false, &motionData, 5));
+    assert(!debounce(0, true, &motionData, 5));
+    assert(!debounce(0, false, &motionData, 5));
     assert(motionData.debounceCounter[0] == 3);
-    assert(!debounce(0, true, &motionData));
-    assert(!debounce(0, true, &motionData));
-    assert(!debounce(0, true, &motionData));
-    assert(debounce(1, true, &motionData));
-    assert(!debounce(0, false, &motionData));
-    assert(debounce(0, true, &motionData));
+    assert(!debounce(0, true, &motionData, 5));
+    assert(!debounce(0, true, &motionData, 5));
+    assert(!debounce(0, true, &motionData, 5));
+    assert(debounce(1, true, &motionData, 5));
+    assert(!debounce(0, false, &motionData, 5));
+    assert(debounce(0, true, &motionData, 5));
     assert(motionData.debounceCounter[1] == 5);
 
 }
