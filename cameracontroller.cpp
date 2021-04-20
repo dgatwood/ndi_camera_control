@@ -365,7 +365,7 @@ int main(int argc, char *argv[]) {
                 g_manual_iris = 0;
                 g_set_manual_iris = false;
             } else {
-                fprintf(stderr, "Set manual iris to %d.\n", g_exposure_compensation);
+                fprintf(stderr, "Set manual iris to %d.\n", g_manual_iris);
             }
         }
 
@@ -380,7 +380,7 @@ int main(int argc, char *argv[]) {
                 g_manual_gain = 0;
                 g_set_manual_gain = false;
             } else {
-                fprintf(stderr, "Set manual iris to %d.\n", g_exposure_compensation);
+                fprintf(stderr, "Set manual iris to %d.\n", g_manual_gain);
             }
         }
 
@@ -395,7 +395,7 @@ int main(int argc, char *argv[]) {
                 g_manual_shutter = 0;
                 g_set_manual_shutter = false;
             } else {
-                fprintf(stderr, "Set manual iris to %d.\n", g_exposure_compensation);
+                fprintf(stderr, "Set manual iris to %d.\n", g_manual_shutter);
             }
         }
 #endif
