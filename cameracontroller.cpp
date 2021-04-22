@@ -30,7 +30,7 @@ static float kCenterMotionThreshold = 0.05;
 
 #ifdef __linux__
 #define USE_AVAHI
-#include <pigpio.h>
+#include <pigpiod_if2.h>
 #endif
 
 #ifdef INCLUDE_VISCA
@@ -155,6 +155,8 @@ enum {
     unsigned char *g_framebufferBase = NULL;
     unsigned char *g_framebufferActiveMemory = NULL;
 
+    int g_pig;
+
     int g_framebufferXRes = 0, g_framebufferYRes = 0, g_NDIXRes = 0, g_NDIYRes = 0;
     double g_xScaleFactor = 0.0, g_yScaleFactor = 0.0;
 
@@ -163,6 +165,8 @@ enum {
     NSWindow *g_mainWindow = nil;
     NSImageView *g_mainImageView = nil;
 #endif  // __linux__
+
+struct timespec last_frame_time;
 
 bool g_ptzEnabled = false;
 
@@ -182,7 +186,6 @@ int8_t g_manual_shutter = 0;
 
 bool g_camera_active = false;
 bool g_camera_preview = false;
-bool g_camera_malfunctioning = false;
 
  
 // Specs are for Marshall cameras.  Other cameras may differ.
@@ -256,6 +259,7 @@ bool g_camera_malfunctioning = false;
 #ifdef INCLUDE_VISCA
     int g_visca_sock = -1;
     int g_visca_port = 0;
+    struct sockaddr_in g_visca_addr;
     bool g_visca_use_udp = false;
 #endif
 
@@ -559,6 +563,11 @@ int main(int argc, char *argv[]) {
         // Destroy the NDI finder. We needed to have access to the pointers to p_sources[0]
         p_NDILib->NDIlib_find_destroy(pNDI_find);
 
+        // NDIlib_tally_t tallySettings;
+        // tallySettings.on_program = true;
+        // tallySettings.on_preview = true;
+        // NDIlib_recv_set_tally(pNDI_recv, &tallySettings);
+
         fprintf(stderr, "Ready.\n");
 
         while (!exit_loop) {
@@ -576,6 +585,7 @@ int main(int argc, char *argv[]) {
                    nullptr, 1500);
             switch(frameType) {
                 case NDIlib_frame_type_video:
+                    clock_gettime(CLOCK_REALTIME, &last_frame_time);
                     if (enable_debugging) {
                         fprintf(stderr, "Video frame\n");
                     }
@@ -1086,6 +1096,10 @@ void avahi_resolve_callback(AvahiServiceResolver *resolver,
 }
 
 void handleDNSResponse(const struct sockaddr *address) {
+    // NewTek's cameras are buggy.  They respond with UDP packets from a different source
+    // port than the port we send to, which makes connected UDP sockets impossible.  This
+    // sucks from a performance perspective, but we work around it by not connecting the
+    // socket.
     g_visca_sock = connectToVISCAPortWithAddress(address);
     if (g_visca_sock == -1) {
         fprintf(stderr, "VISCA failed.");
@@ -1278,20 +1292,38 @@ int connectToVISCAPortWithAddress(const struct sockaddr *address) {
         perror("Socket could not be created.");
         return -1;
     }
-    if (connect(sock, (struct sockaddr *) &sa, sizeof(sa)) == -1) {
-        perror("Connect failed");
+
+    struct sockaddr_in sa_recv;
+    bzero(&sa_recv, sizeof(sa_recv));
+    sa_recv.sin_family = AF_INET;
+    sa_recv.sin_addr.s_addr = INADDR_ANY;
+    sa_recv.sin_port = htons(g_visca_port + 1);
+    if (bind(sock, (sockaddr *)&sa_recv, sizeof(sa_recv)) != 0) {
+        perror("Bind failed");
         close(sock);
         return -1;
+    }
+
+    if (g_visca_use_udp) {
+        g_visca_addr = sa;
+    } else {
+        if (connect(sock, (struct sockaddr *) &sa, sizeof(sa)) == -1) {
+            perror("Connect failed");
+            close(sock);
+            return -1;
+        }
     }
     return sock;
 }
 
+void updateTallyLightsOverVISCA(void);
 void sendZoomUpdatesOverVISCA(motionData_t *motionData);
 void sendPanTiltUpdatesOverVISCA(motionData_t *motionData);
 void sendExposureCompensationOverVISCA(void);
 void sendManualExposureOverVISCA(void);
 
 void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
+    updateTallyLightsOverVISCA();
     sendZoomUpdatesOverVISCA(motionData);
 #ifdef USE_VISCA_FOR_PAN_AND_TILT
     sendPanTiltUpdatesOverVISCA(motionData);
@@ -1304,6 +1336,32 @@ void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
 
 static uint32_t g_visca_sequence_number = 0;
 void send_visca_packet(uint8_t *buf, ssize_t bufsize, int timeout_usec);
+uint8_t *send_visca_inquiry(uint8_t *buf, ssize_t bufsize, int timeout_usec, ssize_t *responseLength);
+
+void updateTallyLightsOverVISCA(void) {
+    uint8_t buf[7] = { 0x81, 0x09, 0x7E, 0x01, 0x0A, 0x01, 0xFF };
+    // uint8_t buf[7] = { 0x81, 0x09, 0x00, 0x02, 0x00, 0x00, 0xFF };  // Firmware version command.
+    ssize_t responseLength = 0;
+    uint8_t *responseBuf = send_visca_inquiry(buf, sizeof(buf), 20000, &responseLength);
+    if (responseBuf) {
+        if (enable_verbose_debugging) {
+            fprintf(stderr, "Got tally data: %s\n", fmtbuf(responseBuf, responseLength));
+        }
+        int tallyMode = responseBuf[2];
+        if (tallyMode == 0) {
+            g_camera_active = false;
+            g_camera_preview = false;
+        } else if (tallyMode == 5) {
+            g_camera_active = true;
+            g_camera_preview = false;
+        } else if (tallyMode == 6) {
+            g_camera_active = false;
+            g_camera_preview = true;
+        } else {
+            fprintf(stderr, "Unknown tally mode %d\n", tallyMode);
+        }
+    }
+}
 
 void sendZoomUpdatesOverVISCA(motionData_t *motionData) {
     uint8_t buf[6] = { 0x81, 0x01, 0x04, 0x07, 0x00, 0xFF };
@@ -1312,7 +1370,9 @@ void sendZoomUpdatesOverVISCA(motionData_t *motionData) {
     if (level != 0) {
         buf[4] = (abs(level) - 1) | (level < 0 ? 0x20 : 0x30);
     }
-    fprintf(stderr, "zoom speed: %d buf: 0x%02x\n", level, buf[4]);
+    if (enable_ptz_debugging) {
+        fprintf(stderr, "zoom speed: %d buf: 0x%02x\n", level, buf[4]);
+    }
 
     send_visca_packet(buf, sizeof(buf), 100000);
 }
@@ -1338,8 +1398,9 @@ void sendPanTiltUpdatesOverVISCA(motionData_t *motionData) {
 }
 
 void sendManualExposureOverVISCA(void) {
+    bool localDebug = enable_ptz_debugging;
     if (g_set_auto_exposure) {
-        if (enable_ptz_debugging || 1) fprintf(stderr, "Enabling automatic exposure.\n");
+        if (localDebug) fprintf(stderr, "Enabling automatic exposure.\n");
         uint8_t disablebuf[6] = { 0x81, 0x01, 0x04, 0x39, 0x00, 0xFF };
         send_visca_packet(disablebuf, sizeof(disablebuf), 100000);
         return;
@@ -1347,26 +1408,26 @@ void sendManualExposureOverVISCA(void) {
         return;
     }
 
-    if (enable_ptz_debugging || 1) fprintf(stderr, "Enabling manual exposure.\n");
+    if (localDebug) fprintf(stderr, "Enabling manual exposure.\n");
     uint8_t enablebuf[6] = { 0x81, 0x01, 0x04, 0x39, 0x03, 0xFF };
     send_visca_packet(enablebuf, sizeof(enablebuf), 100000);
 
     if (g_set_manual_iris) {
-        if (enable_ptz_debugging || 1) fprintf(stderr, "Setting iris position.\n");
+        if (localDebug) fprintf(stderr, "Setting iris position.\n");
         uint8_t irisbuf[9] = { 0x81, 0x01, 0x04, 0x4B, 0x00, 0x00,
                                (uint8_t)(g_manual_iris >> 4), (uint8_t)(g_manual_iris & 0xF), 0xFF };
         send_visca_packet(irisbuf, sizeof(irisbuf), 100000);
     }
 
     if (g_set_manual_gain) {
-        if (enable_ptz_debugging || 1) fprintf(stderr, "Setting gain position.\n");
+        if (localDebug) fprintf(stderr, "Setting gain position.\n");
         uint8_t gainbuf[9] = { 0x81, 0x01, 0x04, 0x4C, 0x00, 0x00,
                                (uint8_t)(g_manual_gain >> 4), (uint8_t)(g_manual_gain & 0xF), 0xFF };
         send_visca_packet(gainbuf, sizeof(gainbuf), 100000);
     }
 
     if (g_set_manual_gain) {
-        if (enable_ptz_debugging || 1) fprintf(stderr, "Setting gain position.\n");
+        if (localDebug) fprintf(stderr, "Setting gain position.\n");
         uint8_t gainbuf[9] = { 0x81, 0x01, 0x04, 0x4A, 0x00, 0x00,
                                (uint8_t)(g_manual_gain >> 4), (uint8_t)(g_manual_gain & 0xF), 0xFF };
         send_visca_packet(gainbuf, sizeof(gainbuf), 100000);
@@ -1390,8 +1451,61 @@ void sendExposureCompensationOverVISCA(void) {
 }
 
 uint8_t get_ack(int sock, int timeout_usec);
+uint8_t *get_ack_data(int sock, int timeout_usec, ssize_t *len);
+void send_visca_packet_raw(uint8_t *buf, ssize_t bufsize, int timeout_usec, bool isInquiry);
+
+uint8_t *send_visca_inquiry(uint8_t *buf, ssize_t bufsize, int timeout_usec, ssize_t *responseLength) {
+    if (g_visca_sock == -1) return NULL;
+
+    send_visca_packet_raw(buf, bufsize, timeout_usec, true);
+    int udp_offset = g_visca_use_udp ? 8 : 0;
+    ssize_t localResponseLength = 0;
+    uint8_t *response = get_ack_data(g_visca_sock, 100000, &localResponseLength);
+    bool valid = false;
+    while (!valid) {
+        valid = true;
+        if (!response) return NULL;
+        int sequence_number = g_visca_sequence_number - 1;
+        if (g_visca_use_udp) {
+            if (response[0] != 0x01 ||
+                response[1] != 0x11 ||
+                response[2] != 0x00 ||
+                response[3] != 0x04 /* ||
+                response[4] != sequence_number >> 24 ||
+                response[5] != (sequence_number >> 16) & 0xff ||
+                response[6] != (sequence_number >> 8) & 0xff ||
+                response[7] != sequence_number & 0xff */) {
+                if (enable_verbose_debugging) {
+                    fprintf(stderr, "Unexpected response packet %s\n", fmtbuf(response, localResponseLength));
+                    fprintf(stderr, "Expected %02x %02x %02x %02x %02x %02x %02x %02x\n", 1, 0x11, 0, 4, sequence_number >> 24,
+                            (sequence_number >> 16) & 0xff, (sequence_number >> 8) & 0xff, sequence_number & 0xff);
+                }
+                valid = false;
+            }
+        }
+        if (response[1 + udp_offset] != 0x50) {
+            if (enable_verbose_debugging) {
+                fprintf(stderr, "Unexpected response packet %s\n", fmtbuf(response, localResponseLength));
+            }
+            valid = false;
+        }
+        if (!valid) {
+            free(response);
+            response = get_ack_data(g_visca_sock, 100000, &localResponseLength);
+        }
+    }
+    uint8_t *returnValue = (uint8_t *)malloc(localResponseLength - udp_offset);
+    bcopy(response + udp_offset, returnValue, localResponseLength - udp_offset);
+    free(response);
+    *responseLength = localResponseLength - udp_offset;
+    return returnValue;
+}
 
 void send_visca_packet(uint8_t *buf, ssize_t bufsize, int timeout_usec) {
+    send_visca_packet_raw(buf, bufsize, timeout_usec, false);
+}
+
+void send_visca_packet_raw(uint8_t *buf, ssize_t bufsize, int timeout_usec, bool isInquiry) {
     if (g_visca_sock == -1) {
         return;
     }
@@ -1400,7 +1514,7 @@ void send_visca_packet(uint8_t *buf, ssize_t bufsize, int timeout_usec) {
         ssize_t udpbufsize = bufsize + 8;
         uint8_t *udpbuf = (uint8_t *)malloc(udpbufsize);
         udpbuf[0] = 0x01;
-        udpbuf[1] = 0x00;
+        udpbuf[1] = isInquiry ? 0x10 : 0x00;
         udpbuf[2] = 0x00;
         udpbuf[3] = bufsize;
         udpbuf[4] = g_visca_sequence_number >> 24;
@@ -1409,9 +1523,11 @@ void send_visca_packet(uint8_t *buf, ssize_t bufsize, int timeout_usec) {
         udpbuf[7] = g_visca_sequence_number & 0xff;
         g_visca_sequence_number++;
         bcopy(buf, udpbuf + 8, bufsize);
-        if (write(g_visca_sock, udpbuf, udpbufsize) != udpbufsize) {
+        if (sendto(g_visca_sock, udpbuf, udpbufsize, 0,
+               (sockaddr *)&g_visca_addr, sizeof(struct sockaddr_in)) != udpbufsize) {
             perror("write failed.");
         }
+
         if (enable_verbose_debugging) {
             fprintf(stderr, "Sent %s\n", fmtbuf(udpbuf, bufsize + 8));
         }
@@ -1422,6 +1538,11 @@ void send_visca_packet(uint8_t *buf, ssize_t bufsize, int timeout_usec) {
         }
     }
 
+    if (isInquiry) {
+        // Let the caller handle the read.
+        return;
+    }
+
     uint8_t ack = get_ack(g_visca_sock, timeout_usec);
     if (ack == 5) return;
     else if (ack == 4) get_ack(g_visca_sock, timeout_usec);
@@ -1430,30 +1551,46 @@ void send_visca_packet(uint8_t *buf, ssize_t bufsize, int timeout_usec) {
     }
 }
 
+uint8_t *get_ack_data(int sock, int timeout_usec, ssize_t *len) {
+    int udp_offset = g_visca_use_udp ? 8 : 0;
+
+    if (enable_verbose_debugging) {
+        fprintf(stderr, "Calling recvfrom\n");
+    }
+    static uint8_t buf[65535];
+    ssize_t received_length = recvfrom(g_visca_sock, buf, sizeof(buf),
+       0, NULL, NULL);
+    if (enable_verbose_debugging) {
+        fprintf(stderr, "Done (len = %llu).\n", (unsigned long long)received_length);
+    }
+
+    uint8_t *ack = (uint8_t *)malloc(received_length);
+    bcopy(buf, ack, received_length);
+    *len = received_length;
+    return ack;
+}
+
 uint8_t get_ack(int sock, int timeout_usec) {
-    unsigned char ack[3];
-    fd_set readfds;
-    FD_ZERO(&readfds);
-    FD_SET(g_visca_sock, &readfds);
-    struct timeval tv;
-    tv.tv_sec = 0;
-    tv.tv_usec = timeout_usec;
-    if (select(g_visca_sock + 1, &readfds, NULL, NULL, &tv) > 0) {
-        read(g_visca_sock, ack, 3);
-    } else if (enable_verbose_debugging) {
-        fprintf(stderr, "Timed out waiting for ack\n");
-        return -1;
+    bool localDebug = enable_verbose_debugging || true;
+    int udp_offset = g_visca_use_udp ? 8 : 0;
+    if (enable_verbose_debugging) {
+        fprintf(stderr, "calling get_ack_data\n");
     }
-    if (ack[0] != 0x90 && enable_verbose_debugging) {
-        fprintf(stderr, "Unexpected ack address 0x%02x\n", ack[0]);
+    int len;
+    unsigned char *ack = get_ack_data(sock, timeout_usec, &len);
+    if (len != 3) return 0;
+    if (!ack) return 0;
+    if (ack[0 + udp_offset] != 0x90 && localDebug) {
+        fprintf(stderr, "Unexpected ack address 0x%02x\n", ack[0 + udp_offset]);
     }
-    uint8_t ack_type = ack[1] >> 4;
-    if (ack_type != 4 && ack_type != 5 && enable_verbose_debugging) {
-        fprintf(stderr, "Unexpected ack type 0x%02x\n", ack[1]);
+    uint8_t ack_type = ack[1 + udp_offset] >> 4;
+    if (ack_type != 4 && ack_type != 5 && localDebug) {
+        fprintf(stderr, "Unexpected ack type 0x%02x\n", ack[1 + udp_offset]);
     }
-    if (ack[2] != 0xff && enable_verbose_debugging) {
-        fprintf(stderr, "Unexpected ack trailer 0x%02x\n", ack[2]);
+    if (ack[2 + udp_offset] != 0xff && localDebug) {
+        fprintf(stderr, "Unexpected ack trailer 0x%02x\n", ack[2 + udp_offset]);
     }
+    free(ack);
     return ack_type;
 }
 
@@ -1768,16 +1905,28 @@ void updateLights(motionData_t *motionData) {
         }
     }
 
-    gpioWrite(5,  litButtons & 0x1);      // 0 (white)
-    gpioWrite(6,  litButtons & 0x10);     // 1 (red)
-    gpioWrite(13, litButtons & 0x100);    // 2 (yellow)
-    gpioWrite(19, litButtons & 0x1000);   // 3 (green)
-    gpioWrite(26, litButtons & 0x10000);  // 4 (blue)
-    gpioWrite(12, litButtons & 0x100000); // 5 (black)
+    gpio_write(g_pig, 5,  litButtons & 0x1);      // 0 (white)
+    gpio_write(g_pig, 6,  litButtons & 0x10);     // 1 (red)
+    gpio_write(g_pig, 13, litButtons & 0x100);    // 2 (yellow)
+    gpio_write(g_pig, 19, litButtons & 0x1000);   // 3 (green)
+    gpio_write(g_pig, 26, litButtons & 0x10000);  // 4 (blue)
+    gpio_write(g_pig, 12, litButtons & 0x100000); // 5 (black)
 
-    gpioWrite(16, g_camera_active);
-    gpioWrite(20, g_camera_preview);
-    gpioWrite(21, g_camera_malfunctioning);
+    gpio_write(g_pig, 16, g_camera_active);
+    gpio_write(g_pig, 20, g_camera_preview);
+
+    struct timespec current_wallclock_time;
+    clock_gettime(CLOCK_REALTIME, &current_wallclock_time);
+    // Add at most a second if the seconds are different.  If we've lost more than a second of video,
+    // things aren't working anyway.
+    uint64_t diff = ((current_wallclock_time.tv_sec != last_frame_time.tv_sec) ? 1000000000 : 0) +
+        current_wallclock_time.tv_nsec - last_frame_time.tv_nsec;
+
+    bool camera_malfunctioning = diff > 100000000;  // Scream after losing 3 frames.
+
+    gpio_write(g_pig, 21, camera_malfunctioning);
+    fprintf(stderr, "Camera: %s\n", camera_malfunctioning ? "MALFUNCTIONING" : "normal");
+    // fprintf(stderr, "%d %d %d %d\n", current_wallclock_time.tv_nsec, last_frame_time.tv_nsec, current_wallclock_time.tv_sec, last_frame_time.tv_nsec);
 
     // Pinout for lights (last 12 pins):
     // GPIO 5 - White light  | Ground - NC
@@ -1789,17 +1938,21 @@ void updateLights(motionData_t *motionData) {
 }
 
 bool configureGPIO(void) {
-    if (gpioInitialise() == PI_INIT_FAILED) return false;
+    g_pig = pigpio_start(NULL, NULL);
+    if (g_pig < 0) {
+        fprintf(stderr, "Could not connect to pigpiod daemon.  (Try sudo systemctl enable pigpiod)\n");
+        return false;
+    }
 
-    if (gpioSetMode(5, PI_OUTPUT)) return false;
-    if (gpioSetMode(6, PI_OUTPUT)) return false;
-    if (gpioSetMode(12, PI_OUTPUT)) return false;
-    if (gpioSetMode(13, PI_OUTPUT)) return false;
-    if (gpioSetMode(16, PI_OUTPUT)) return false;
-    if (gpioSetMode(19, PI_OUTPUT)) return false;
-    if (gpioSetMode(20, PI_OUTPUT)) return false;
-    if (gpioSetMode(21, PI_OUTPUT)) return false;
-    if (gpioSetMode(26, PI_OUTPUT)) return false;
+    if (set_mode(g_pig, 5, PI_OUTPUT)) return false;
+    if (set_mode(g_pig, 6, PI_OUTPUT)) return false;
+    if (set_mode(g_pig, 12, PI_OUTPUT)) return false;
+    if (set_mode(g_pig, 13, PI_OUTPUT)) return false;
+    if (set_mode(g_pig, 16, PI_OUTPUT)) return false;
+    if (set_mode(g_pig, 19, PI_OUTPUT)) return false;
+    if (set_mode(g_pig, 20, PI_OUTPUT)) return false;
+    if (set_mode(g_pig, 21, PI_OUTPUT)) return false;
+    if (set_mode(g_pig, 26, PI_OUTPUT)) return false;
 
     return true;
 }
