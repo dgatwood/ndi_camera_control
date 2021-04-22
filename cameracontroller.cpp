@@ -6,6 +6,7 @@
 #include <string>
 #include <thread>
 
+#include <math.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -21,12 +22,15 @@
 
 #include <Processing.NDI.Lib.h>
 
+static float kCenterMotionThreshold = 0.05;
+
 #define INCLUDE_VISCA
 #define USE_VISCA_FOR_PAN_AND_TILT
 #define USE_VISCA_FOR_EXPOSURE_COMPENSATION
 
 #ifdef __linux__
 #define USE_AVAHI
+#include <pigpio.h>
 #endif
 
 #ifdef INCLUDE_VISCA
@@ -124,6 +128,7 @@ typedef struct {
     float zoomPosition;
     int storePositionNumber;    // Set button is down along with a number button (sent once/debounced).
     int retrievePositionNumber; // A number button is down by itself (sent once/debounced).
+    bool setButtonDown;         // True if set button is down.
 
     // Debounce support.
     bool previousValue[MAX_BUTTONS + 1];  // 0 .. MAX_BUTTONS
@@ -152,6 +157,8 @@ enum {
 
     int g_framebufferXRes = 0, g_framebufferYRes = 0, g_NDIXRes = 0, g_NDIYRes = 0;
     double g_xScaleFactor = 0.0, g_yScaleFactor = 0.0;
+
+    void updateLights(motionData_t *motionData);
 #else  // ! __linux__
     NSWindow *g_mainWindow = nil;
     NSImageView *g_mainImageView = nil;
@@ -172,6 +179,10 @@ int8_t g_manual_gain = 0;
 
 bool g_set_manual_shutter = false;
 int8_t g_manual_shutter = 0;
+
+bool g_camera_active = false;
+bool g_camera_preview = false;
+bool g_camera_malfunctioning = false;
 
  
 // Specs are for Marshall cameras.  Other cameras may differ.
@@ -293,10 +304,20 @@ char *fmtbuf(uint8_t *buf, ssize_t size);
 #ifdef __linux__
     int pinNumberForAxis(int axis);
     int pinNumberForButton(int button);
+
+    bool configureGPIO(void);
 #endif  // __linux__
 
 int main(int argc, char *argv[]) {
     runUnitTests();
+
+#ifdef __linux__
+    if (!configureGPIO()) {
+      fprintf(stderr, "GPIO initialization failed\n");
+      return 1;
+    }
+#endif  // __linux__
+
     char *stream_name = argv[argc - 1];
     if (argc < 2) {
         fprintf(stderr, "Usage: camera_control \"stream name\"\n");
@@ -1527,7 +1548,7 @@ float readAxisPosition(int axis) {
         } else {
             value = value * value;  // Logarithmic curve.
         }
-        if (value > -0.05 && value < 0.05) { value = 0; }  // Keep the center stable.
+        if (value > -kCenterMotionThreshold && value < kCenterMotionThreshold) { value = 0; }  // Keep the center stable.
 
         if (enable_ptz_debugging) {
             fprintf(stderr, "axis %d: raw: %d scaled: %f ", axis, rawValue, value);
@@ -1662,17 +1683,17 @@ void updatePTZValues() {
     }
 
     // Determine whether the set button is down.
-    bool isSetButtonDown = readButton(BUTTON_SET, &newMotionData);
+    newMotionData.setButtonDown = readButton(BUTTON_SET, &newMotionData);
 
     // Print a debug message when the user presses or releases the set button,
     // but only once per transition.
     static bool showedInitialState = false;
     static bool lastSetButtonDown = false;
-    if (!showedInitialState || (isSetButtonDown != lastSetButtonDown)) {
-        fprintf(stderr, "Set button %s\n", isSetButtonDown ? "DOWN" : "UP");
+    if (!showedInitialState || (newMotionData.setButtonDown != lastSetButtonDown)) {
+        fprintf(stderr, "Set button %s\n", newMotionData.setButtonDown ? "DOWN" : "UP");
         showedInitialState = true;
     }
-    lastSetButtonDown = isSetButtonDown;
+    lastSetButtonDown = newMotionData.setButtonDown;
 
     /*
      * Compute the number of the position to store or retrieve.
@@ -1695,13 +1716,15 @@ void updatePTZValues() {
      */
     for (int i = 1; i <= MAX_BUTTONS; i++) {
         if (readButton(i, &newMotionData)) {
-            if (isSetButtonDown) {
+            if (newMotionData.setButtonDown) {
                 newMotionData.storePositionNumber = i;
             } else {
                 newMotionData.retrievePositionNumber = i;
             }
         }
     }
+
+    updateLights(&newMotionData);
 
     setMotionData(newMotionData);
 #ifdef INCLUDE_VISCA
@@ -1710,6 +1733,77 @@ void updatePTZValues() {
     }
 #endif
 }
+
+void updateLights(motionData_t *motionData) {
+    static int blinkingButtons = 0;  // bitmap
+    static int litButtons = 0;       // bitmap
+    static int blinkCounter = 0;
+    static bool holdAfterBlink = true;
+
+    if (fabs(motionData->xAxisPosition) > kCenterMotionThreshold ||
+        fabs(motionData->yAxisPosition) > kCenterMotionThreshold ||
+        fabs(motionData->zoomPosition) > kCenterMotionThreshold) {
+            // Reset.
+            litButtons = 0;
+            holdAfterBlink = false;
+    } else {
+        if (motionData->retrievePositionNumber) {
+            litButtons = motionData->setButtonDown | (1 << motionData->retrievePositionNumber);
+            blinkCounter = 0;
+        } else if (motionData->storePositionNumber > 0) {
+            blinkingButtons |= 1 << motionData->storePositionNumber;
+            blinkCounter = 125;
+        }
+    }
+
+    if (blinkCounter) {
+        blinkCounter--;
+        if ((blinkCounter / 25) % 2 == 0) {
+            litButtons |= blinkingButtons;
+        } else {
+            litButtons &= ~blinkingButtons;
+        }
+        if (blinkCounter == 0 && !holdAfterBlink) {
+            litButtons &= ~blinkingButtons;
+        }
+    }
+
+    gpioWrite(5,  litButtons & 0x1);      // 0 (white)
+    gpioWrite(6,  litButtons & 0x10);     // 1 (red)
+    gpioWrite(13, litButtons & 0x100);    // 2 (yellow)
+    gpioWrite(19, litButtons & 0x1000);   // 3 (green)
+    gpioWrite(26, litButtons & 0x10000);  // 4 (blue)
+    gpioWrite(12, litButtons & 0x100000); // 5 (black)
+
+    gpioWrite(16, g_camera_active);
+    gpioWrite(20, g_camera_preview);
+    gpioWrite(21, g_camera_malfunctioning);
+
+    // Pinout for lights (last 12 pins):
+    // GPIO 5 - White light  | Ground - NC
+    // GPIO 6 - Red light    | GPIO 12 - Black
+    // GPIO13 - Yellow light | Ground - NC
+    // GPIO19 - Green light  | GPIO 16 - RGB Red
+    // GPIO26 - Blue light   | GPIO 20 - RGB Green
+    // Ground - All LEDs     | GPIO 21 - RGB Blue
+}
+
+bool configureGPIO(void) {
+    if (gpioInitialise() == PI_INIT_FAILED) return false;
+
+    if (gpioSetMode(5, PI_OUTPUT)) return false;
+    if (gpioSetMode(6, PI_OUTPUT)) return false;
+    if (gpioSetMode(12, PI_OUTPUT)) return false;
+    if (gpioSetMode(13, PI_OUTPUT)) return false;
+    if (gpioSetMode(16, PI_OUTPUT)) return false;
+    if (gpioSetMode(19, PI_OUTPUT)) return false;
+    if (gpioSetMode(20, PI_OUTPUT)) return false;
+    if (gpioSetMode(21, PI_OUTPUT)) return false;
+    if (gpioSetMode(26, PI_OUTPUT)) return false;
+
+    return true;
+}
+
 #endif
 
 void setMotionData(motionData_t newMotionData) {
