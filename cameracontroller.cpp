@@ -566,8 +566,8 @@ int main(int argc, char *argv[]) {
         p_NDILib->NDIlib_find_destroy(pNDI_find);
 
         // NDIlib_tally_t tallySettings;
-        // tallySettings.on_program = true;
-        // tallySettings.on_preview = true;
+        // tallySettings.on_program = false;
+        // tallySettings.on_preview = false;
         // NDIlib_recv_set_tally(pNDI_recv, &tallySettings);
 
         fprintf(stderr, "Ready.\n");
@@ -1951,13 +1951,6 @@ void updateLights(motionData_t *motionData) {
     gpio_write(g_pig, 26, (bool)(litButtons & 0b10000));  // 4 (blue)
     gpio_write(g_pig, 12, (bool)(litButtons & 0b100000)); // 5 (black)
 
-    /* fprintf(stderr, "Preview: %s Program: %s\n",
-            onoff[g_camera_preview],
-            onoff[g_camera_active]); */
-
-    gpio_write(g_pig, 16, g_camera_active);
-    gpio_write(g_pig, 20, g_camera_preview);
-
     struct timespec current_wallclock_time;
     clock_gettime(CLOCK_REALTIME, &current_wallclock_time);
     // Add at most a second if the seconds are different.  If we've lost more than a second of video,
@@ -1967,8 +1960,16 @@ void updateLights(motionData_t *motionData) {
 
     bool camera_malfunctioning = diff > 100000000;  // Scream after losing 3 frames.
 
+    gpio_write(g_pig, 16, g_camera_active && !camera_malfunctioning);
+    gpio_write(g_pig, 20, g_camera_preview && !camera_malfunctioning);
     gpio_write(g_pig, 21, camera_malfunctioning);
+
+    // fprintf(stderr, "Preview: %s Program: %s\n",
+            // onoff[g_camera_preview && !camera_malfunctioning],
+            // onoff[g_camera_active && !camera_malfunctioning]);
+
     // fprintf(stderr, "Camera: %s\n", camera_malfunctioning ? "MALFUNCTIONING" : "normal");
+
     // fprintf(stderr, "%d %d %d %d\n", current_wallclock_time.tv_nsec, last_frame_time.tv_nsec, current_wallclock_time.tv_sec, last_frame_time.tv_nsec);
 
     // Pinout for lights (last 12 pins):
