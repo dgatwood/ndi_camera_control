@@ -22,6 +22,8 @@
 
 #include <Processing.NDI.Lib.h>
 
+#define PULSES_PER_BLINK 2
+
 static float kCenterMotionThreshold = 0.05;
 
 #define INCLUDE_VISCA
@@ -1554,14 +1556,28 @@ void send_visca_packet_raw(uint8_t *buf, ssize_t bufsize, int timeout_usec, bool
 uint8_t *get_ack_data(int sock, int timeout_usec, ssize_t *len) {
     int udp_offset = g_visca_use_udp ? 8 : 0;
 
-    if (enable_verbose_debugging) {
-        fprintf(stderr, "Calling recvfrom\n");
-    }
     static uint8_t buf[65535];
-    ssize_t received_length = recvfrom(g_visca_sock, buf, sizeof(buf),
-       0, NULL, NULL);
-    if (enable_verbose_debugging) {
-        fprintf(stderr, "Done (len = %llu).\n", (unsigned long long)received_length);
+
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(g_visca_sock, &readfds);
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = timeout_usec;
+    ssize_t received_length = 0;
+    if (select(g_visca_sock + 1, &readfds, NULL, NULL, &tv) > 0) {
+        if (enable_verbose_debugging) {
+            fprintf(stderr, "Calling recvfrom\n");
+        }
+        received_length = recvfrom(g_visca_sock, buf, sizeof(buf),
+           0, NULL, NULL);
+        if (enable_verbose_debugging) {
+            fprintf(stderr, "Done (len = %llu).\n", (unsigned long long)received_length);
+        }
+    } else {
+        fprintf(stderr, "Timed out waiting for ack from camera.\n");
+        *len = 0;
+        return NULL;
     }
 
     uint8_t *ack = (uint8_t *)malloc(received_length);
@@ -1760,7 +1776,7 @@ bool readButton(int buttonNumber, motionData_t *motionData) {
         }
     #endif  // __linux__
 
-    return debounce(buttonNumber, value, motionData, 20);
+    return debounce(buttonNumber, value, motionData, 3);
 }
 
 bool debounce(int buttonNumber, bool value, motionData_t *motionData, int debounceCount) {
@@ -1877,25 +1893,37 @@ void updateLights(motionData_t *motionData) {
     static int blinkCounter = 0;
     static bool holdAfterBlink = true;
 
+// fprintf(stderr, "Pos: %d\n", motionData->retrievePositionNumber);
+
+    const int setButtonMask = 0b00000001;
+    const int mainButtonMask = 0b00111110;
+
+    litButtons &= ~setButtonMask;
+    litButtons |= motionData->setButtonDown;
     if (fabs(motionData->xAxisPosition) > kCenterMotionThreshold ||
         fabs(motionData->yAxisPosition) > kCenterMotionThreshold ||
         fabs(motionData->zoomPosition) > kCenterMotionThreshold) {
             // Reset.
+            // fprintf(stderr, "LIGHTS: Motion\n");
             litButtons = 0;
             holdAfterBlink = false;
     } else {
         if (motionData->retrievePositionNumber) {
-            litButtons = motionData->setButtonDown | (1 << motionData->retrievePositionNumber);
+            // fprintf(stderr, "LIGHTS: Retrieve %d\n", motionData->retrievePositionNumber);
             blinkCounter = 0;
+            litButtons &= ~mainButtonMask;
+            litButtons |= (1 << motionData->retrievePositionNumber);
         } else if (motionData->storePositionNumber > 0) {
+            // fprintf(stderr, "LIGHTS: Store %d\n", motionData->storePositionNumber);
             blinkingButtons |= 1 << motionData->storePositionNumber;
-            blinkCounter = 125;
+            blinkCounter = PULSES_PER_BLINK * 5;
         }
     }
 
     if (blinkCounter) {
         blinkCounter--;
-        if ((blinkCounter / 25) % 2 == 0) {
+        // fprintf(stderr, "LIGHTS: Blink: %d\n", blinkingButtons);
+        if ((blinkCounter / PULSES_PER_BLINK) % 2 == 0) {
             litButtons |= blinkingButtons;
         } else {
             litButtons &= ~blinkingButtons;
@@ -1903,14 +1931,29 @@ void updateLights(motionData_t *motionData) {
         if (blinkCounter == 0 && !holdAfterBlink) {
             litButtons &= ~blinkingButtons;
         }
+    } else {
+        blinkingButtons = 0;
     }
 
-    gpio_write(g_pig, 5,  litButtons & 0x1);      // 0 (white)
-    gpio_write(g_pig, 6,  litButtons & 0x10);     // 1 (red)
-    gpio_write(g_pig, 13, litButtons & 0x100);    // 2 (yellow)
-    gpio_write(g_pig, 19, litButtons & 0x1000);   // 3 (green)
-    gpio_write(g_pig, 26, litButtons & 0x10000);  // 4 (blue)
-    gpio_write(g_pig, 12, litButtons & 0x100000); // 5 (black)
+    const char *onoff[2] = { "OFF", "ON " };
+    /* fprintf(stderr, "White: %s Red: %s Yellow: %s Green: %s Blue: %s Black: %s\n",
+            onoff[(bool)(litButtons & 0b1)],
+            onoff[(bool)(litButtons & 0b10)],
+            onoff[(bool)(litButtons & 0b100)],
+            onoff[(bool)(litButtons & 0b1000)],
+            onoff[(bool)(litButtons & 0b10000)],
+            onoff[(bool)(litButtons & 0b100000)]); */
+
+    gpio_write(g_pig, 5,  (bool)(litButtons & 0b1));      // 0 (white)
+    gpio_write(g_pig, 6,  (bool)(litButtons & 0b10));     // 1 (red)
+    gpio_write(g_pig, 13, (bool)(litButtons & 0b100));    // 2 (yellow)
+    gpio_write(g_pig, 19, (bool)(litButtons & 0b1000));   // 3 (green)
+    gpio_write(g_pig, 26, (bool)(litButtons & 0b10000));  // 4 (blue)
+    gpio_write(g_pig, 12, (bool)(litButtons & 0b100000)); // 5 (black)
+
+    /* fprintf(stderr, "Preview: %s Program: %s\n",
+            onoff[g_camera_preview],
+            onoff[g_camera_active]); */
 
     gpio_write(g_pig, 16, g_camera_active);
     gpio_write(g_pig, 20, g_camera_preview);
@@ -1925,7 +1968,7 @@ void updateLights(motionData_t *motionData) {
     bool camera_malfunctioning = diff > 100000000;  // Scream after losing 3 frames.
 
     gpio_write(g_pig, 21, camera_malfunctioning);
-    fprintf(stderr, "Camera: %s\n", camera_malfunctioning ? "MALFUNCTIONING" : "normal");
+    // fprintf(stderr, "Camera: %s\n", camera_malfunctioning ? "MALFUNCTIONING" : "normal");
     // fprintf(stderr, "%d %d %d %d\n", current_wallclock_time.tv_nsec, last_frame_time.tv_nsec, current_wallclock_time.tv_sec, last_frame_time.tv_nsec);
 
     // Pinout for lights (last 12 pins):
@@ -1998,7 +2041,7 @@ void *runPTZThread(void *argIgnored) {
 #ifdef __linux__
         }
 #endif
-        usleep(5000);
+        // usleep(5000); // Kill the delay entirely.  The I/O Expander is too slow.
 #endif
     }
 }
