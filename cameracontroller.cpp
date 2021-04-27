@@ -162,11 +162,12 @@ enum {
     int g_framebufferXRes = 0, g_framebufferYRes = 0, g_NDIXRes = 0, g_NDIYRes = 0;
     double g_xScaleFactor = 0.0, g_yScaleFactor = 0.0;
 
-    void updateLights(motionData_t *motionData);
 #else  // ! __linux__
     NSWindow *g_mainWindow = nil;
     NSImageView *g_mainImageView = nil;
 #endif  // __linux__
+
+void updateLights(motionData_t *motionData);
 
 struct timespec last_frame_time;
 
@@ -1592,7 +1593,7 @@ uint8_t get_ack(int sock, int timeout_usec) {
     if (enable_verbose_debugging) {
         fprintf(stderr, "calling get_ack_data\n");
     }
-    int len;
+    ssize_t len;
     unsigned char *ack = get_ack_data(sock, timeout_usec, &len);
     if (len != 3) return 0;
     if (!ack) return 0;
@@ -1944,12 +1945,15 @@ void updateLights(motionData_t *motionData) {
             onoff[(bool)(litButtons & 0b10000)],
             onoff[(bool)(litButtons & 0b100000)]); */
 
+#if __linux__
+
     gpio_write(g_pig, 5,  (bool)(litButtons & 0b1));      // 0 (white)
     gpio_write(g_pig, 6,  (bool)(litButtons & 0b10));     // 1 (red)
     gpio_write(g_pig, 13, (bool)(litButtons & 0b100));    // 2 (yellow)
     gpio_write(g_pig, 19, (bool)(litButtons & 0b1000));   // 3 (green)
     gpio_write(g_pig, 26, (bool)(litButtons & 0b10000));  // 4 (blue)
     gpio_write(g_pig, 12, (bool)(litButtons & 0b100000)); // 5 (black)
+#endif // __linux__
 
     struct timespec current_wallclock_time;
     clock_gettime(CLOCK_REALTIME, &current_wallclock_time);
@@ -1960,9 +1964,11 @@ void updateLights(motionData_t *motionData) {
 
     bool camera_malfunctioning = diff > 100000000;  // Scream after losing 3 frames.
 
+#if __linux__
     gpio_write(g_pig, 16, g_camera_active && !camera_malfunctioning);
     gpio_write(g_pig, 20, g_camera_preview && !camera_malfunctioning);
     gpio_write(g_pig, 21, camera_malfunctioning);
+#endif // __linux__
 
     // fprintf(stderr, "Preview: %s Program: %s\n",
             // onoff[g_camera_preview && !camera_malfunctioning],
@@ -1982,6 +1988,7 @@ void updateLights(motionData_t *motionData) {
 }
 
 bool configureGPIO(void) {
+#ifdef __linux__
     g_pig = pigpio_start(NULL, NULL);
     if (g_pig < 0) {
         fprintf(stderr, "Could not connect to pigpiod daemon.  (Try sudo systemctl enable pigpiod)\n");
@@ -1997,6 +2004,7 @@ bool configureGPIO(void) {
     if (set_mode(g_pig, 20, PI_OUTPUT)) return false;
     if (set_mode(g_pig, 21, PI_OUTPUT)) return false;
     if (set_mode(g_pig, 26, PI_OUTPUT)) return false;
+#endif // __linux__
 
     return true;
 }
