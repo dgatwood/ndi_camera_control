@@ -130,9 +130,10 @@ typedef struct {
     float zoomPosition;
     int storePositionNumber;    // Set button is down along with a number button (sent once/debounced).
     int retrievePositionNumber; // A number button is down by itself (sent once/debounced).
-    bool setButtonDown;         // True if set button is down.
+    bool setMode;               // True if pushing a button should set the state rather than retrieving it.
 
     // Debounce support.
+    bool setButtonDown;         // True if set button is down.
     bool previousValue[MAX_BUTTONS + 1];  // 0 .. MAX_BUTTONS
     int debounceCounter[MAX_BUTTONS + 1];  // 0 .. MAX_BUTTONS
 } motionData_t;
@@ -1847,6 +1848,9 @@ void updatePTZValues() {
         fprintf(stderr, "Set button %s\n", newMotionData.setButtonDown ? "DOWN" : "UP");
         showedInitialState = true;
     }
+    if (newMotionData.setButtonDown && !lastSetButtonDown) {
+        newMotionData.setMode = !newMotionData.setMode;
+    }
     lastSetButtonDown = newMotionData.setButtonDown;
 
     /*
@@ -1870,7 +1874,7 @@ void updatePTZValues() {
      */
     for (int i = 1; i <= MAX_BUTTONS; i++) {
         if (readButton(i, &newMotionData)) {
-            if (newMotionData.setButtonDown) {
+            if (newMotionData.setMode) {
                 newMotionData.storePositionNumber = i;
             } else {
                 newMotionData.retrievePositionNumber = i;
@@ -1900,7 +1904,7 @@ void updateLights(motionData_t *motionData) {
     const int mainButtonMask = 0b00111110;
 
     litButtons &= ~setButtonMask;
-    litButtons |= motionData->setButtonDown;
+    litButtons |= motionData->setMode;
     if (fabs(motionData->xAxisPosition) > kCenterMotionThreshold ||
         fabs(motionData->yAxisPosition) > kCenterMotionThreshold ||
         fabs(motionData->zoomPosition) > kCenterMotionThreshold) {
