@@ -1910,7 +1910,7 @@ void updateLights(motionData_t *motionData) {
         fabs(motionData->zoomPosition) > kCenterMotionThreshold) {
             // Reset.
             // fprintf(stderr, "LIGHTS: Motion\n");
-            litButtons = 0;
+            litButtons &= ~mainButtonMask;
             holdAfterBlink = false;
     } else {
         if (motionData->retrievePositionNumber) {
