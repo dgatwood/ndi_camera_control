@@ -1,0 +1,155 @@
+NDI/VISCA PTZ Controller for Raspberry Pi
+
+This code is a complete, but basic console-based pan-tilt-zoom controller for the Raspberry Pi 4.
+(In other words, this does not run in X11; it literally writes directly to the framebuffer.)
+
+---------
+Features:
+---------
+
+* Requires the Pimoroni I/O Expander for input purposes.
+* Supports three-axis analog joysticks.
+* Supports five pushbuttons for loading stored positions, and a set button for storing new positions.
+* Supports lights for showing which position was most recently loaded (reset when you move the camera)
+  and for the set button (toggle) state.
+* Supports remote tally light polling to show whether the camera is in preview mode, program mode,
+  inactive, or unresponsive (e.g. a network failure).
+
+
+--------------
+Prerequisites:
+--------------
+
+* Configure the console to use 32 bpp.  In config.txt, add/change:
+
+  disable_overscan=0
+  framebuffer_depth=32
+  display_rotate=2
+  dtparam=i2c_arm=on
+  dtparam=spi=on
+
+* For HDMI panels, add/change:
+
+  max_usb_current=1
+  hdmi_force_hotplug=1
+  hdmi_group=1
+  hdmi_mode=16
+  hdmi_drive=2
+
+* For DSI panels, add/change:
+
+  video=DSI-1:1920x1080@60
+  framebuffer_width=1920
+  framebuffer_height=1080
+
+* Disable the videocore 3D driver by commenting out the following line:
+
+  # dtoverlay=vc4-fkms-v3d
+
+* Disable the blinking cursor on the virtual console that you plan to use.
+
+  In cmdline.txt, change the console to:
+
+    console=tty3
+
+  And add:
+    vt.global_cursor_default=0
+
+* Disable X11 in raspi-config.
+* Install the NDI SDK from NewTek (available separately).
+* Install Avahi (client and common libraries).
+* Install pigpiod and enable the daemon.
+* Build the custom hardware.
+* Configure dhcpcd on your device to use a static IP fallback in the same IP range as your cameras
+  (typically 192.168.100.x).  For example:
+
+  profile static_eth0
+  static ip_address=192.168.100.23/24
+  static routers=192.168.100.1
+  static domain_name_servers=192.168.100.1
+  interface eth0
+  fallback static_eth0
+
+* Add NDI to ld.so configuration if it is not there already:
+
+  Create a file named /etc/ld.so.conf.d/ndi.conf and paste in the following:
+
+    /usr/local/NDISDK/lib/arm-rpi3-linux-gnueabihf
+
+  or wherever you installed the SDK.
+
+
+-------------------
+Command-line flags:
+-------------------
+
+To see a list of available cameras, type ./cameracontroller and press return.  This currently
+loops forever, because cameras may not appear instantly.  Press Control-\ to terminate the app.
+We should probably fix this at some point.
+
+Usage:
+
+    ./cameracontroller [flags] <camera_name>
+
+where <camera_name> is typically something like "NDIHX-PTZUHD (chan 1, 192.168.100.168)".
+
+Note that this tool searches for a camera with a matching name and IP address first, but then
+falls back to a name match at a different IP.  Be certain that each camera has its own
+distinct name, because there is no guarantee that this software will correctly detect the camera
+in the initial scan before falling back and matching against identically named cameras at
+different IP addresses.
+
+General flags:
+
+  -f / --fast                   -- Enables preview mode, in which a lower quality (typically 720p)
+                                   stream is requested.  This can be helpful for cameras that
+                                   produce higher bitrate streams.  (You can play NDI-HX streams
+                                   from iOS devices without this flag.)
+
+VISCA command-line flags:
+
+  -V / --enable_visca           -- Enables VISCA for camera control.
+  -p / --visca-port
+
+VISCA-only features:
+
+  -e / --exposure_compensation  -- Sets exposure compensation amount (-5 to 5)
+  -a / --auto_exposure          -- Enables automatic exposure (disables -i/-ig/-s).
+  -i / --iris                   -- Sets manual exposure with the specified iris (range 0 to 20).
+                                   The meaning of these values is camera-dependent.
+  -g / --gain                   -- Sets manual exposure with the specified gain (range 0 to 15).
+                                   The meaning of these values is camera-dependent.
+  -s / --shutter                -- Sets manual exposure with the specified shutter (range 0 to 21).
+                                   The meaning of these values is camera-dependent.
+
+Debugging:
+
+  -d / --debug                  -- Enables some basic debugging
+  -B / --buttondebug            -- Enables button-specific debugging
+  -P / --ptzdebug               -- Enables PTZ (joystick) debugging
+  -v / --verbose                -- Enables more detailed debugging
+
+
+----------------
+Common Mistakes:
+----------------
+
+If the tool can see your camera but cannot receive video:
+
+1.  Reboot the camera.  Some cameras have known bugs.
+2.  Make sure your IPv4 address is working.  Most cameras support IPv6 for
+    discovery, but do NOT support streaming over IPv6.
+3.  In particular, make sure that you aren't sharing an IP address with
+    another camera or PTZ controller!
+4.  Make sure you aren't running any weird firewalls that might interfere.
+
+
+----------------------
+Building the Hardware:
+----------------------
+
+The custom hardware construction (for actual PTZ control) is documented here:
+
+https://docs.google.com/document/d/1Ss_mx8vgRw_ys8ocJK7LZhjXRocf9EI3qovyQXoxxJw/edit?usp=sharing
+
+Enjoy!
