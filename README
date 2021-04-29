@@ -151,6 +151,9 @@ General flags:
                                    produce higher bitrate streams.  (You can play NDI-HX streams
                                    from iOS devices without this flag.)
 
+  -D / --duty_cycle             -- Sets the duty cycle that should be used for all LEDs
+                                   (range 0 to 255).
+
 VISCA command-line flags:
 
   -V / --enable_visca           -- Enables VISCA for camera control.
@@ -185,6 +188,13 @@ Debugging:
   -P / --ptzdebug               -- Enables PTZ (joystick) debugging
   -v / --verbose                -- Enables more detailed debugging
 
+
+--------------------
+Other Configuration:
+--------------------
+
+The file LEDConfiguration.h lets you change the brightness of each
+LED individually.
 
 ----------------
 Common Mistakes:
