@@ -13,8 +13,46 @@ Features:
 * Supports lights for showing which position was most recently loaded (reset when you move the camera)
   and for the set button (toggle) state.
 * Supports remote tally light polling to show whether the camera is in preview mode, program mode,
-  inactive, or unresponsive (e.g. a network failure).
+  inactive, or unresponsive (e.g. a network failure).  (Requires a VISCA-compatible camera.)
+* Supports zooming at variable speed.  (Requires a VISCA-compatible camera.)
 
+
+-------------------
+A Note About VISCA:
+-------------------
+
+VISCA is a protocol for controlling PTZ cameras over IP.  Every NDI camera that I have tested so far
+supports VISCA, though some devices may require you to use a different port.  This code has been tested
+against cameras by AVKANS, NewTek, and Marshall.  Your mileage may vary.
+
+The reason VISCA is required for full functionality is that the NDI protocol doesn't provide some
+required features.  I've filed bugs with the NDI SDK team about some of these issues, and will continue
+to try to find ways to eliminate the need for VISCA, because it's kind of a bloated, unreliable mess
+(and this code is a particularly hackish implementation that I wrote very quickly to work around
+those limitations).
+
+Specifically, the following functionality does not work when working with a pure NDI camera:
+
+* Tally light support.  The NDI SDK lets you set the tally light, but not obtain its current state.
+  If you're using OBS, it would theoretically be possible to add OBS websocket support to this app,
+  which would allow you to find out whether OBS has turned on the tally light or not.  However, all
+  of my cameras support VISCA, so it wasn't worth the effort to do that when I already had a
+  mostly working VISCA implementation.
+
+* Zoom speed support.  This should work; the NDI SDK lets you pass a zoom speed value from -1.0 to 1.0.
+  However, in real-world testing, exactly none of the cameras I tested were able to zoom at multiple
+  speeds when driven through that function call (from either the Linux/Raspbery Pi SDK or the macOS SDK).
+  Presumably, this will get fixed at some point on the camera side, at which point VISCA will no longer
+  be required for this purpose.
+
+* Exposure adjustment and manual exposure.  The NDI SDK lacks exposure compensation APIs, though it
+  does provide manual exposure settings.  But because all my cameras support VISCA, it wasn't worth
+  the extra effort to hook up the manual exposure calls via NDI.  (It's would take only about two
+  lines of code, though, so if you need it, it should be an easy change.)
+
+This PTZ controller software looks up the camera using Avahi, then connects to the VISCA UDP port on
+that same device.  This may or may not be the best approach, but it works (with the caveat that you
+have to provide the VISCA port).
 
 --------------
 Prerequisites:
@@ -116,7 +154,18 @@ General flags:
 VISCA command-line flags:
 
   -V / --enable_visca           -- Enables VISCA for camera control.
-  -p / --visca-port
+  -u / --visca_use_udp          -- Enables UDP mode for VISCA.  At this point, TCP support is
+                                   untested, so you should always pass this flag.
+  -p / --visca-port             -- Sets the VISCA port.  Most cameras use port 52381 UDP.
+                                   However, this code defaults to the PTZOptics port, 1259 UDP.
+                                   Note that PTZOptics cameras are entirely untested.
+  -m / --no-visca-motion        -- Disables VISCA for panning and tilting.  For some reason,
+                                   the Newtek PTZUHD camera does not respond to VISCA commands
+                                   for panning and tilting (this may be a bug on my side), but
+                                   handles zoom and tally correctly.  Adding this flag makes
+                                   this PTZ software use NDI for panning and tilting.  In
+                                   combination with -V, it continues to use VISCA for zoom
+                                   (for speed reasons) and tally light polling.
 
 VISCA-only features:
 
