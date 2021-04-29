@@ -20,6 +20,13 @@ Features:
 Prerequisites:
 --------------
 
+* Download my C translation of the Pimoroni I/O Expander library:
+
+  https://github.com/dgatwood/ioe-c
+
+  and symlink the files constants.h and ioexpander.c into the
+  source folder.
+
 * Configure the console to use 32 bpp.  In config.txt, add/change:
 
   disable_overscan=0
