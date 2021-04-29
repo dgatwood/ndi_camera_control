@@ -22,6 +22,7 @@
 
 #include <Processing.NDI.Lib.h>
 
+
 #define PULSES_PER_BLINK 2
 
 static float kCenterMotionThreshold = 0.05;
@@ -62,6 +63,8 @@ static float kCenterMotionThreshold = 0.05;
     #include <linux/input.h>
     #include <sys/mman.h>
     #include <sys/user.h>
+
+    #include "LEDConfiguration.h"
 
     #define I2C_ADDRESS 0x18
 
@@ -120,6 +123,10 @@ bool disable_visca_pan_tilt = false;
     #ifndef PAGE_MASK
         #define PAGE_MASK (~(PAGE_SIZE - 1))
     #endif
+
+/* LED duty cycle. */
+uint8_t base_duty_cycle = 255;
+
 #endif
 
 #define MAX_BUTTONS 6  // Theoretically, 9, but I don't want to build that much hardware.  Numbered 1 to 6.
@@ -311,6 +318,8 @@ char *fmtbuf(uint8_t *buf, ssize_t size);
 #endif
 
 #ifdef __linux__
+    bool cc_gpio_write(int pi, unsigned gpio, unsigned level);
+
     int pinNumberForAxis(int axis);
     int pinNumberForButton(int button);
 
@@ -338,6 +347,21 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Enabling debugging (slow).\n");
             enable_debugging = true;
         }
+#ifdef __linux__
+        if (!strcmp(argv[i], "-D") || !strcmp(argv[i], "--duty_cycle")) {
+            fprintf(stderr, "Enabling PTZ debugging.\n");
+            if (argc > i + 1) {
+                long requested_duty_cycle = atoi(argv[i+1]);
+                if (requested_duty_cycle >= 0 &&
+                    requested_duty_cycle <= 255) {
+                    base_duty_cycle = (uint8_t)requested_duty_cycle;
+                } else {
+                    fprintf(stderr, "Invalid duty cycle %d.  (Valid range: 0 to 255)\n", requested_duty_cycle);
+                }
+                i++;
+            }
+        }
+#endif  // __linux__
         if (!strcmp(argv[i], "-B") || !strcmp(argv[i], "--buttondebug")) {
             fprintf(stderr, "Enabling PTZ debugging.\n");
             enable_button_debugging = true;
@@ -1967,13 +1991,12 @@ void updateLights(motionData_t *motionData) {
             onoff[(bool)(litButtons & 0b100000)]); */
 
 #if __linux__
-
-    gpio_write(g_pig, 5,  (bool)(litButtons & 0b1));      // 0 (white)
-    gpio_write(g_pig, 6,  (bool)(litButtons & 0b10));     // 1 (red)
-    gpio_write(g_pig, 13, (bool)(litButtons & 0b100));    // 2 (yellow)
-    gpio_write(g_pig, 19, (bool)(litButtons & 0b1000));   // 3 (green)
-    gpio_write(g_pig, 26, (bool)(litButtons & 0b10000));  // 4 (blue)
-    gpio_write(g_pig, 12, (bool)(litButtons & 0b100000)); // 5 (black)
+    cc_gpio_write(g_pig, LED_PIN_WHITE,  (bool)(litButtons & 0b1));      // 0 (white)
+    cc_gpio_write(g_pig, LED_PIN_RED,  (bool)(litButtons & 0b10));     // 1 (red)
+    cc_gpio_write(g_pig, LED_PIN_YELLOW, (bool)(litButtons & 0b100));    // 2 (yellow)
+    cc_gpio_write(g_pig, LED_PIN_GREEN, (bool)(litButtons & 0b1000));   // 3 (green)
+    cc_gpio_write(g_pig, LED_PIN_BLUE, (bool)(litButtons & 0b10000));  // 4 (blue)
+    cc_gpio_write(g_pig, LED_PIN_PURPLE, (bool)(litButtons & 0b100000)); // 5 (black)
 #endif // __linux__
 
     struct timespec current_wallclock_time;
@@ -1986,9 +2009,14 @@ void updateLights(motionData_t *motionData) {
     bool camera_malfunctioning = diff > 100000000;  // Scream after losing 3 frames.
 
 #if __linux__
-    gpio_write(g_pig, 16, g_camera_active && !camera_malfunctioning);
-    gpio_write(g_pig, 20, g_camera_preview && !camera_malfunctioning);
-    gpio_write(g_pig, 21, camera_malfunctioning);
+    // Program/RGB red
+    cc_gpio_write(g_pig, LED_PIN_RGB_RED, g_camera_active && !camera_malfunctioning);
+
+    // Preview/RGB green
+    cc_gpio_write(g_pig, LED_PIN_RGB_GREEN, g_camera_preview && !camera_malfunctioning);
+
+    // Malfunction/RGB blue
+    cc_gpio_write(g_pig, LED_PIN_RGB_BLUE, camera_malfunctioning);
 #endif // __linux__
 
     // fprintf(stderr, "Preview: %s Program: %s\n",
@@ -2016,18 +2044,76 @@ bool configureGPIO(void) {
         return false;
     }
 
-    if (set_mode(g_pig, 5, PI_OUTPUT)) return false;
-    if (set_mode(g_pig, 6, PI_OUTPUT)) return false;
-    if (set_mode(g_pig, 12, PI_OUTPUT)) return false;
-    if (set_mode(g_pig, 13, PI_OUTPUT)) return false;
-    if (set_mode(g_pig, 16, PI_OUTPUT)) return false;
-    if (set_mode(g_pig, 19, PI_OUTPUT)) return false;
-    if (set_mode(g_pig, 20, PI_OUTPUT)) return false;
-    if (set_mode(g_pig, 21, PI_OUTPUT)) return false;
-    if (set_mode(g_pig, 26, PI_OUTPUT)) return false;
+    if (set_mode(g_pig, LED_PIN_WHITE, PI_OUTPUT))
+        return false;
+    if (set_mode(g_pig, LED_PIN_RED, PI_OUTPUT))
+        return false;
+    if (set_mode(g_pig, LED_PIN_YELLOW, PI_OUTPUT))
+        return false;
+    if (set_mode(g_pig, LED_PIN_GREEN, PI_OUTPUT))
+        return false;
+    if (set_mode(g_pig, LED_PIN_BLUE, PI_OUTPUT))
+        return false;
+    if (set_mode(g_pig, LED_PIN_PURPLE, PI_OUTPUT))
+        return false;
+    if (set_mode(g_pig, LED_PIN_RGB_RED, PI_OUTPUT))
+        return false;
+    if (set_mode(g_pig, LED_PIN_RGB_GREEN, PI_OUTPUT))
+        return false;
+    if (set_mode(g_pig, LED_PIN_RGB_BLUE, PI_OUTPUT))
+        return false;
 #endif // __linux__
 
     return true;
+}
+
+uint8_t dutyCycle(int pin) {
+    double adjustment = 1.0;
+    switch(pin) {
+        case LED_PIN_WHITE: // Button 0 (Set)
+            adjustment = WHITE_DUTY_CYCLE;
+            break;
+        case LED_PIN_RED: // Button 1
+            adjustment = RED_DUTY_CYCLE;
+            break;
+        case LED_PIN_YELLOW: // Button 2
+            adjustment = YELLOW_DUTY_CYCLE;
+            break;
+        case LED_PIN_GREEN: // Button 3
+            adjustment = GREEN_DUTY_CYCLE;
+            break;
+        case LED_PIN_BLUE: // Button 4
+            adjustment = BLUE_DUTY_CYCLE;
+            break;
+        case LED_PIN_PURPLE: // Button 5
+            adjustment = PURPLE_DUTY_CYCLE;
+            break;
+        case LED_PIN_RGB_RED:  // Tally Program
+            adjustment = RGB_RED_DUTY_CYCLE;
+            break;
+        case LED_PIN_RGB_GREEN:  // Tally Preview
+            adjustment = RGB_GREEN_DUTY_CYCLE;
+            break;
+        case LED_PIN_RGB_BLUE:  // Tally Malfunction
+            adjustment = RGB_BLUE_DUTY_CYCLE;
+            break;
+        default:
+            adjustment = 1.0;
+    }
+    int64_t duty_cycle = (base_duty_cycle * adjustment);
+    if (duty_cycle < 0) return 0;
+    if (duty_cycle > 255) return 255;
+    return (uint8_t)duty_cycle;
+}
+
+// A variant of gpio_write that automatically sets a
+// duty cycle on the pin instead of just turning it on.
+bool cc_gpio_write(int pi, unsigned gpio, unsigned level) {
+    if (level) {
+        return set_PWM_dutycycle(g_pig, gpio, dutyCycle(gpio));
+    } else {
+        return gpio_write(pi, gpio, level);
+    }
 }
 
 #endif

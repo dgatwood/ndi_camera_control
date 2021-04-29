@@ -11,7 +11,7 @@ LDFLAGS=${LINUXLDFLAGS}
 # CXXFLAGS=${MACCXXFLAGS}
 # LDFLAGS=${MACLDFLAGS}
 
-cameracontroller: cameracontroller.cpp
+cameracontroller: cameracontroller.cpp LEDConfiguration.h
 
 libmpv:
 	cd mpv && ./bootstrap.py  && ./waf configure --enable-libmpv-static --enable-lgpl && ./waf build
