@@ -1359,9 +1359,7 @@ void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
     updateTallyLightsOverVISCA();
     sendZoomUpdatesOverVISCA(motionData);
 #ifdef USE_VISCA_FOR_PAN_AND_TILT
-    if (!disable_visca_pan_tilt) {
-      sendPanTiltUpdatesOverVISCA(motionData);
-    }
+    sendPanTiltUpdatesOverVISCA(motionData);
 #endif
 #ifdef USE_VISCA_FOR_EXPOSURE_COMPENSATION
     sendExposureCompensationOverVISCA();
@@ -1402,6 +1400,13 @@ void sendZoomUpdatesOverVISCA(motionData_t *motionData) {
     uint8_t buf[6] = { 0x81, 0x01, 0x04, 0x07, 0x00, 0xFF };
     int level = (int)(motionData->zoomPosition * 8.9);
 
+    static int last_zoom_level = 0;
+
+    if (level == last_zoom_level) {
+        return;
+    }
+    last_zoom_level = level;
+
     if (level != 0) {
         buf[4] = (abs(level) - 1) | (level < 0 ? 0x20 : 0x30);
     }
@@ -1416,6 +1421,15 @@ void sendPanTiltUpdatesOverVISCA(motionData_t *motionData) {
     int pan_level = (int)(motionData->xAxisPosition * 24.9);
     int tilt_level = (int)(motionData->yAxisPosition * 23.9);
 
+    static int last_pan_level = 0;
+    static int last_tilt_level = 0;
+
+    if (pan_level == last_pan_level && tilt_level == last_tilt_level) {
+        return;
+    }
+    last_pan_level = pan_level;
+    last_tilt_level = tilt_level;
+
     bool left = pan_level > 0;
     bool right = pan_level < 0;
     bool up = tilt_level > 0;
@@ -1428,6 +1442,12 @@ fprintf(stderr, "%s %s %s %s %d %d\n",
         down ? "true" : "false",
         pan_level,
         tilt_level);
+
+    // When we hammer away at some cameras, they occasionally drop the stop
+    // command.  So send that even if VISCA pan and tilt are disabled.
+    if (disable_visca_pan_tilt && (left || right || up || down)) {
+        return;
+    }
 
     uint8_t pan_command = left ? 0x01 : right ? 0x02 : 0x03;
     uint8_t tilt_command = up ? 0x01 : down ? 0x02 : 0x03;
@@ -1444,6 +1464,12 @@ fprintf(stderr, "%s %s %s %s %d %d\n",
 
 void sendManualExposureOverVISCA(void) {
     bool localDebug = enable_ptz_debugging;
+
+    // Send this command only a few times on launch.
+    static int count = 5;
+    if (!count) return;
+    count--;
+
     if (g_set_auto_exposure) {
         if (localDebug) fprintf(stderr, "Enabling automatic exposure.\n");
         uint8_t disablebuf[6] = { 0x81, 0x01, 0x04, 0x39, 0x00, 0xFF };
@@ -1481,6 +1507,11 @@ void sendManualExposureOverVISCA(void) {
 
 void sendExposureCompensationOverVISCA(void) {
     if (!g_set_exposure_compensation) { return; }
+
+    // Send this command only a few times on launch.
+    static int count = 5;
+    if (!count) return;
+    count--;
 
     // Enable exposure compensation.
     uint8_t enablebuf[6] = { 0x81, 0x01, 0x04, 0x3E, (uint8_t)(g_exposure_compensation == 0 ? 0x03 : 0x02), 0xFF };
@@ -1678,9 +1709,11 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
 #endif
 
 #ifdef USE_VISCA_FOR_PAN_AND_TILT
-    if (!enable_visca || g_visca_sock == -1 || disable_visca_pan_tilt) {
+    if (!enable_visca || g_visca_sock == -1 ||
+        (disable_visca_pan_tilt && (copyOfMotionData.xAxisPosition != 0 || copyOfMotionData.yAxisPosition != 0))) {
 #endif
         NDIlib_recv_ptz_pan_tilt_speed(pNDI_recv, copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
+
         if (enable_ptz_debugging) {
             if (copyOfMotionData.xAxisPosition != 0 || copyOfMotionData.yAxisPosition != 0) {
                 fprintf(stderr, "xSpeed: %f, ySpeed; %f ", copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
@@ -2140,11 +2173,15 @@ motionData_t getMotionData() {
     return newMotionData;
 }
 
-// Run this computation 200 times per second.  That's more than enough to update
-// the state every frame (and then some), and probably enough to update it for
-// every audio frame, give or take.  But by only doing this periodically, we
-// limit the amount of CPU overhead, leaving more cycles to do the actual
-// H.264 or H.265 decoding.
+// Run this computation up to 2000 times per second.  In practice, the NDI side
+// doesn't need the data that quickly, but the VISCA side runs slowly enough that
+// a longer delay makes it not work well.  However, no delay causes the NDI side
+// to drop pan commands, resulting in the camera continuing to pan indefinitely
+// even after you stop panning.
+// 
+// The goal was to do this only 200 times per second.  By only doing this
+// periodically, we limit the amount of CPU overhead, leaving more cycles to do
+// the actual H.264 or H.265 decoding.
 void *runPTZThread(void *argIgnored) {
     while (true) {
 #ifdef DEMO_MODE
@@ -2157,7 +2194,8 @@ void *runPTZThread(void *argIgnored) {
 #ifdef __linux__
         }
 #endif
-        // usleep(5000); // Kill the delay entirely.  The I/O Expander is too slow.
+        // The I/O expander is slow enough that we don't
+        usleep(5000);
 #endif
     }
 }
