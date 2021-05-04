@@ -325,6 +325,8 @@ char *fmtbuf(uint8_t *buf, ssize_t size);
     bool configureGPIO(void);
 #endif  // __linux__
 
+void runNDIRunLoop(const NDIlib_v3 *p_NDILib, NDIlib_recv_instance_t pNDI_recv, char *stream_name);
+
 int main(int argc, char *argv[]) {
     runUnitTests();
 
@@ -338,7 +340,7 @@ int main(int argc, char *argv[]) {
     char *stream_name = argv[argc - 1];
     if (argc < 2) {
         fprintf(stderr, "Usage: camera_control \"stream name\"\n");
-        fprintf(stderr, "Known sources:\n");
+        fprintf(stderr, "Known sources (polling for 5 seconds):\n");
         stream_name = NULL;
     }
     for (int i = 1; i < argc - 1; i++) {
@@ -545,11 +547,12 @@ int main(int argc, char *argv[]) {
         uint32_t no_sources = 0;
         const NDIlib_source_t *p_sources = NULL;
         int source_number = -1;
-        while (!exit_loop && source_number == -1) {
+        time_t scanStartTime = time(NULL);
+        while (source_number == -1 && time(NULL) < scanStartTime + 5) {
             if (enable_debugging) fprintf(stderr, "Waiting for source.\n");
 
             // Wait until the sources on the network have changed
-            p_NDILib->NDIlib_find_wait_for_sources(pNDI_find, 1000000);
+            p_NDILib->NDIlib_find_wait_for_sources(pNDI_find, 1000);
             p_sources = p_NDILib->NDIlib_find_get_current_sources(pNDI_find, &no_sources);
 
             // If the user provided the name of a stream to display, search for it specifically.
@@ -597,7 +600,22 @@ int main(int argc, char *argv[]) {
         // NDIlib_recv_set_tally(pNDI_recv, &tallySettings);
 
         fprintf(stderr, "Ready.\n");
+        runNDIRunLoop(p_NDILib, pNDI_recv, stream_name);
 
+        // Clean up the library as a whole.
+        p_NDILib->NDIlib_destroy();
+
+#ifndef __linux__
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CFRunLoopStop(CFRunLoopGetMain());
+        });
+    });
+    NSApplicationLoad();
+    CFRunLoopRun(pNDI_recv, stream_name);
+#endif
+}
+
+void runNDIRunLoop(const NDIlib_v3 *p_NDILib, NDIlib_recv_instance_t pNDI_recv, char *stream_name) {
         while (!exit_loop) {
             NDIlib_video_frame_v2_t video_recv;
 #ifdef ENABLE_AUDIO
@@ -681,18 +699,6 @@ int main(int argc, char *argv[]) {
             p_NDILib->NDIlib_recv_destroy(pNDI_recv);
             printf("The NDI receiver has been destroyed.\n");
         }
-
-        // Clean up the library as a whole.
-        p_NDILib->NDIlib_destroy();
-
-#ifndef __linux__
-        dispatch_async(dispatch_get_main_queue(), ^{
-            CFRunLoopStop(CFRunLoopGetMain());
-        });
-    });
-    NSApplicationLoad();
-    CFRunLoopRun();
-#endif
 }
 
 void truncate_name_before_ip(char *name) {
@@ -1921,7 +1927,9 @@ void updatePTZValues() {
     static bool showedInitialState = false;
     static bool lastSetButtonDown = false;
     if (!showedInitialState || (newMotionData.setButtonDown != lastSetButtonDown)) {
-        fprintf(stderr, "Set button %s\n", newMotionData.setButtonDown ? "DOWN" : "UP");
+        if (enable_button_debugging) {
+            fprintf(stderr, "Set button %s\n", newMotionData.setButtonDown ? "DOWN" : "UP");
+        }
         showedInitialState = true;
     }
     if (newMotionData.setButtonDown && !lastSetButtonDown) {
