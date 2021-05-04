@@ -107,7 +107,6 @@ bool enable_verbose_debugging = false;
 /* Enable VISCA-over-IP camera control. */
 #ifdef INCLUDE_VISCA
 bool enable_visca = false;
-bool disable_visca_pan_tilt = false;
 #endif
 
 #pragma mark - Constants and types
@@ -382,10 +381,6 @@ int main(int argc, char *argv[]) {
         if (!strcmp(argv[i], "-V") || !strcmp(argv[i], "--enable_visca")) {
             fprintf(stderr, "Enabling VISCA-over-IP control.\n");
             enable_visca = true;
-        }
-        if (!strcmp(argv[i], "-m") || !strcmp(argv[i], "--no-visca-motion")) {
-            fprintf(stderr, "Disabling VISCA for panning and tiliting (zoom and tally only)\n");
-            disable_visca_pan_tilt = true;
         }
         if (!strcmp(argv[i], "-u") || !strcmp(argv[i], "--visca_use_udp")) {
             fprintf(stderr, "Enabling VISCA UDP.\n");
@@ -1457,12 +1452,6 @@ void sendPanTiltUpdatesOverVISCA(motionData_t *motionData) {
                             pan_level,
                             tilt_level);
 
-    // When we hammer away at some cameras, they occasionally drop the stop
-    // command.  So send that even if VISCA pan and tilt are disabled.
-    if (disable_visca_pan_tilt && (left || right || up || down)) {
-        return;
-    }
-
     uint8_t pan_command = left ? 0x01 : right ? 0x02 : 0x03;
     uint8_t tilt_command = up ? 0x01 : down ? 0x02 : 0x03;
 
@@ -1723,8 +1712,7 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
 #endif
 
 #ifdef USE_VISCA_FOR_PAN_AND_TILT
-    if (!enable_visca || g_visca_sock == -1 ||
-        (disable_visca_pan_tilt && (copyOfMotionData.xAxisPosition != 0 || copyOfMotionData.yAxisPosition != 0))) {
+    if (!enable_visca || g_visca_sock == -1) {
 #endif
         NDIlib_recv_ptz_pan_tilt_speed(pNDI_recv, copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
 

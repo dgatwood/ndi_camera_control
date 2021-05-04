@@ -162,9 +162,6 @@ VISCA command-line flags:
   -p / --visca-port             -- Sets the VISCA port.  Most cameras use port 52381 UDP.
                                    However, this code defaults to the PTZOptics port, 1259 UDP.
                                    Note that PTZOptics cameras are entirely untested.
-  -m / --no-visca-motion        -- Disables VISCA for panning and tilting.  (Deprecated bug
-                                   workaround).  In combination with -V, it continues to use
-                                   VISCA for zoom (for speed reasons) and tally light polling.
 
 VISCA-only features:
 
