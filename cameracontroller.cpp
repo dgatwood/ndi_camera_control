@@ -755,6 +755,7 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
 #ifdef __linux__
     // Read the current framebuffer settings so that we can restore them later.
     int framebufferMemoryOffset = 0;
+    int zero = 0;
     g_framebufferFileHandle = open("/dev/fb0", O_RDWR);
     if (g_framebufferFileHandle == -1) {
         perror("cameracontroller: open");
@@ -873,11 +874,17 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
     }
 
     bool drawFrame(NDIlib_video_frame_v2_t *video_recv) {
-        int zero = 0;
-        ioctl(g_framebufferFileHandle, FBIO_WAITFORVSYNC, &zero);  // Should work, but doesn't.
-
         if (!configureScreen(video_recv)) {
             return false;
+        }
+
+        static void *tempBuf = NULL;
+        ssize_t screenSize = g_framebufferActiveConfiguration.xres *
+                             g_framebufferActiveConfiguration.yres *
+                             monitor_bytes_per_pixel;
+        if (tempBuf == NULL) {
+            tempBuf = mmap(0, screenSize, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         }
         if (g_xScaleFactor == 1.0 && g_yScaleFactor == 1.0 && monitor_bytes_per_pixel == 4 && !force_slow_path) {
             if (enable_verbose_debugging) {
@@ -889,8 +896,8 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
                 fprintf(stderr, "slowpath (%f / %f)\n", g_xScaleFactor, g_yScaleFactor);
             }
             uint32_t *inBuf = (uint32_t *)video_recv->p_data;
-            uint16_t *outBuf16 = (uint16_t *)g_framebufferBase;
-            uint32_t *outBuf32 = (uint32_t *)g_framebufferBase;
+            uint16_t *outBuf16 = (uint16_t *)tempBuf;
+            uint32_t *outBuf32 = (uint32_t *)tempBuf;
             for (int y = 0; y < video_recv->yres; y++) {
                 int minRow = scaledRow(y);
                 int maxRow = scaledRow(y+1) - 1;
@@ -919,6 +926,12 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
         }
         // memset(g_framebufferBase, 0xffffffff, (video_recv->xres * video_recv->yres * 2));
         // memset(g_framebufferBase, 0xffffffff, (video_recv->xres * video_recv->yres * 2));
+
+        int zero = 0;
+        if (ioctl(g_framebufferFileHandle, FBIO_WAITFORVSYNC, &zero) == -1) {
+            perror("cameracontroller:  FBIO_WAITFORVSYNC");
+        }
+        bcopy(tempBuf, g_framebufferBase, screenSize);
 
         return true;
     }
@@ -1418,6 +1431,7 @@ void sendZoomUpdatesOverVISCA(motionData_t *motionData) {
 }
 
 void sendPanTiltUpdatesOverVISCA(motionData_t *motionData) {
+    const bool localDebug = false;
     int pan_level = (int)(motionData->xAxisPosition * 24.9);
     int tilt_level = (int)(motionData->yAxisPosition * 23.9);
 
@@ -1435,13 +1449,13 @@ void sendPanTiltUpdatesOverVISCA(motionData_t *motionData) {
     bool up = tilt_level > 0;
     bool down = tilt_level < 0;
 
-fprintf(stderr, "%s %s %s %s %d %d\n",
-        left ? "true" : "false",
-        right ? "true" : "false",
-        up ? "true" : "false",
-        down ? "true" : "false",
-        pan_level,
-        tilt_level);
+    if (localDebug) fprintf(stderr, "%s %s %s %s %d %d\n",
+                            left ? "true" : "false",
+                            right ? "true" : "false",
+                            up ? "true" : "false",
+                            down ? "true" : "false",
+                            pan_level,
+                            tilt_level);
 
     // When we hammer away at some cameras, they occasionally drop the stop
     // command.  So send that even if VISCA pan and tilt are disabled.
@@ -1457,7 +1471,7 @@ fprintf(stderr, "%s %s %s %s %d %d\n",
     buf[4] = abs(pan_level) ?: 1; // Pan speed: 1 to 24 (0x18)
     buf[5] = abs(tilt_level) ?: 1; // Pan speed: 1 to 24 (0x18)
 
-    fprintf(stderr, "Sent packet %s\n", fmtbuf(buf, 9));
+    if (localDebug) fprintf(stderr, "Sent packet %s\n", fmtbuf(buf, 9));
 
     send_visca_packet(buf, sizeof(buf), 100000);
 }
