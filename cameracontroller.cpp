@@ -145,6 +145,21 @@ typedef struct {
     int debounceCounter[MAX_BUTTONS + 1];  // 0 .. MAX_BUTTONS
 } motionData_t;
 
+typedef struct receiver_thread_data {
+    const NDIlib_v3 *p_NDILib;
+    NDIlib_recv_instance_t pNDI_recv;
+    char *stream_name;
+    std::atomic<bool> running; //(true);
+} *receiver_thread_data_t;
+
+typedef struct receiver_array_item {
+    char *name;
+    NDIlib_recv_instance_t receiver;
+    struct receiver_array_item *next;
+    pthread_t receiver_thread;
+    receiver_thread_data_t thread_data;
+} *receiver_array_item_t;
+
 enum {
     kPTZAxisX = 1,
     kPTZAxisY,
@@ -174,6 +189,8 @@ enum {
     NSWindow *g_mainWindow = nil;
     NSImageView *g_mainImageView = nil;
 #endif  // __linux__
+
+receiver_array_item_t g_active_receivers = NULL;
 
 void updateLights(motionData_t *motionData);
 
@@ -290,9 +307,9 @@ motionData_t g_motionData;
     DNSServiceRef g_browseRef = NULL, g_resolveRef = NULL, g_lookupRef = NULL;
 #endif
 
-static std::atomic<bool> exit_loop(false);
+static std::atomic<bool> exit_app(false);
 static void sigint_handler(int)
-{    exit_loop = true;
+{    exit_app = true;
 }
 
 void runUnitTests(void);
@@ -306,6 +323,10 @@ uint32_t find_named_source(const NDIlib_source_t *p_sources,
                            uint32_t no_sources,
                            char *stream_name,
                            bool use_fallback);
+bool source_name_compare(const char *name1, const char *name2, bool use_fallback);
+bool sourceIsActiveForName(const char *source_name);
+void free_receiver_item(receiver_array_item_t receiver_item);
+void *runNDIRunLoop(void *receiver_thread_data_ref);
 char *fmtbuf(uint8_t *buf, ssize_t size);
 
 #ifdef INCLUDE_VISCA
@@ -324,8 +345,6 @@ char *fmtbuf(uint8_t *buf, ssize_t size);
 
     bool configureGPIO(void);
 #endif  // __linux__
-
-void runNDIRunLoop(const NDIlib_v3 *p_NDILib, NDIlib_recv_instance_t pNDI_recv, char *stream_name);
 
 int main(int argc, char *argv[]) {
     runUnitTests();
@@ -548,7 +567,11 @@ int main(int argc, char *argv[]) {
         const NDIlib_source_t *p_sources = NULL;
         int source_number = -1;
         time_t scanStartTime = time(NULL);
-        while (source_number == -1 && time(NULL) < scanStartTime + 5) {
+
+        if (stream_name) {
+            fprintf(stderr, "Searching for stream \"%s\"\n", stream_name);
+        }
+        do {
             if (enable_debugging) fprintf(stderr, "Waiting for source.\n");
 
             // Wait until the sources on the network have changed
@@ -558,37 +581,84 @@ int main(int argc, char *argv[]) {
             // If the user provided the name of a stream to display, search for it specifically.
             // Otherwise, just show a list of valid sources and exit.  Either way, iterate
             // through the sources.
-            if (stream_name) {
-                fprintf(stderr, "Searching for stream \"%s\"\n", stream_name);
-            }
             source_number = find_named_source(p_sources, no_sources, stream_name, false);
             if (stream_name != NULL && source_number == -1) {
                 source_number = find_named_source(p_sources, no_sources, stream_name, true);
             }
-        }
 
-        // If the user pressed control-C this early, exit immediately.
-        if (!p_sources) exit(0);
+            if (p_sources != NULL && source_number != -1) {
+                // See if there is already an active receiver for the exact
+                // NDI source name (which includes the IP, typically).
+                // If so, don't connect again to the same camera.  If not,
+                // reconnect.
+                const char *found_source_name = p_sources[source_number].p_ndi_name;
+                bool is_active = sourceIsActiveForName(found_source_name);
 
-        if (source_number == -1) {
-            printf("Could not find source.\n");
-            exit(1);
-        }
+                if (!is_active) {
+                    // Create the receiver
+                    NDIlib_recv_create_v3_t NDI_recv_create_desc = {
+                        p_sources[source_number],
+                        NDIlib_recv_color_format_BGRX_BGRA,
+                        use_low_res_preview ? NDIlib_recv_bandwidth_lowest : NDIlib_recv_bandwidth_highest,
+                        false,
+                        "NDIRec"
+                    };
+                    NDIlib_recv_instance_t pNDI_recv = NDIlib_recv_create_v3(&NDI_recv_create_desc);
+                    if (pNDI_recv) {
+                        receiver_array_item_t receiver_item = (receiver_array_item_t)malloc(sizeof(*receiver_item));
+                        receiver_item->receiver = pNDI_recv;
+                        asprintf(&receiver_item->name, "%s", found_source_name);
+                        receiver_item->next = g_active_receivers;
+                        receiver_thread_data_t thread_data = (receiver_thread_data_t)malloc(sizeof(*thread_data));
+                        thread_data->p_NDILib = p_NDILib;
+                        thread_data->pNDI_recv = receiver_item->receiver;
+                        asprintf(&thread_data->stream_name, "%s", stream_name);
+                        thread_data->running = true;
+                        receiver_item->thread_data = thread_data;
+                        if (pthread_create(&receiver_item->receiver_thread, NULL, runNDIRunLoop, thread_data) == 0) {
+                            g_active_receivers = receiver_item;
+                            fprintf(stderr, "Connected.\n");
+                        } else {
+                            free_receiver_item(receiver_item);
+                        }
+                    }
+                }
+            }
+            receiver_array_item_t receiver_item = g_active_receivers;
+            while (receiver_item != NULL) {
+                receiver_array_item_t next_receiver = receiver_item->next;
+                if (!receiver_item->thread_data->running) {
+                    if (receiver_item->receiver != nullptr) {
+                        // Clean up the NDI receiver (stops packet transmission).
+            
+                        printf("Closing the connection.\n");
+                        p_NDILib->NDIlib_recv_connect(receiver_item->receiver, NULL);
+            
+                        printf("Destroying the NDI receiver.\n");
+                        p_NDILib->NDIlib_recv_destroy(receiver_item->receiver);
+                        printf("The NDI receiver has been destroyed.\n");
+                    }
+                    if (g_active_receivers == receiver_item) {
+                        g_active_receivers = next_receiver;
+                    } else {
+                        receiver_array_item_t previous_receiver_item = g_active_receivers;
+                        while (previous_receiver_item != NULL && previous_receiver_item->next != receiver_item) {
+                            previous_receiver_item = previous_receiver_item->next;
+                        }
+                        if (previous_receiver_item->next == receiver_item) {
+                            previous_receiver_item->next = next_receiver;
+                        }
+                    }
+                    free_receiver_item(receiver_item);
+                }
+                receiver_item = next_receiver;
+            }
+        } while (!exit_app && (stream_name != NULL || (time(NULL) < scanStartTime + 5)));
 
-        NDIlib_recv_create_v3_t NDI_recv_create_desc = {
-                p_sources[source_number],
-                NDIlib_recv_color_format_BGRX_BGRA,
-                use_low_res_preview ? NDIlib_recv_bandwidth_lowest : NDIlib_recv_bandwidth_highest,
-                false,
-                "NDIRec"
-        };
-
-        // Create the receiver
-        NDIlib_recv_instance_t pNDI_recv = NDIlib_recv_create_v3(&NDI_recv_create_desc);
-
-        if (!pNDI_recv)
-        {    p_NDILib->NDIlib_find_destroy(pNDI_find);
-            exit(0);
+        exit_app = true;
+        for (receiver_array_item_t receiver_item = g_active_receivers;
+             receiver_item != NULL; receiver_item = receiver_item->next) {
+            pthread_join(receiver_item->receiver_thread, NULL);
         }
 
         // Destroy the NDI finder. We needed to have access to the pointers to p_sources[0]
@@ -598,9 +668,6 @@ int main(int argc, char *argv[]) {
         // tallySettings.on_program = false;
         // tallySettings.on_preview = false;
         // NDIlib_recv_set_tally(pNDI_recv, &tallySettings);
-
-        fprintf(stderr, "Ready.\n");
-        runNDIRunLoop(p_NDILib, pNDI_recv, stream_name);
 
         // Clean up the library as a whole.
         p_NDILib->NDIlib_destroy();
@@ -615,137 +682,91 @@ int main(int argc, char *argv[]) {
 #endif
 }
 
-void runNDIRunLoop(const NDIlib_v3 *p_NDILib, NDIlib_recv_instance_t pNDI_recv, char *stream_name) {
-        while (!exit_loop) {
-            NDIlib_video_frame_v2_t video_recv;
+#pragma mark - Video rendering
+
+void *runNDIRunLoop(void *receiver_thread_data_ref) {
+    receiver_thread_data_t thread_data = (receiver_thread_data_t)receiver_thread_data_ref;
+    const NDIlib_v3 *p_NDILib = thread_data->p_NDILib;
+    NDIlib_recv_instance_t pNDI_recv = thread_data->pNDI_recv;
+    char *stream_name = stream_name;
+
+    bool exit_loop = false;
+    while(!exit_loop && !exit_app) {
+        NDIlib_video_frame_v2_t video_recv;
 #ifdef ENABLE_AUDIO
-            NDIlib_audio_frame_v3_t audio_recv;
+        NDIlib_audio_frame_v3_t audio_recv;
 #endif
-            NDIlib_frame_type_e frameType =
+        NDIlib_frame_type_e frameType =
             NDIlib_recv_capture_v3(pNDI_recv, &video_recv,
 #ifdef ENABLE_AUDIO
-                   &audio_recv,
+                                   &audio_recv,
 #else
-                   nullptr,
+                                   nullptr,
 #endif
-                   nullptr, 1500);
-            switch(frameType) {
-                case NDIlib_frame_type_video:
-                    clock_gettime(CLOCK_REALTIME, &last_frame_time);
-                    if (enable_debugging) {
-                        fprintf(stderr, "Video frame\n");
-                    }
-                    if (!drawFrame(&video_recv)) {
-                        // The framebuffer configuration failed.  We can't do anything.
-                        exit_loop = true;
-                    }
-                    NDIlib_recv_free_video_v2(pNDI_recv, &video_recv);
-                    break;
-                case NDIlib_frame_type_status_change:
-                    g_ptzEnabled = NDIlib_recv_ptz_is_supported(pNDI_recv);
-                    break;
+                                   nullptr, 1500);
+        switch(frameType) {
+            case NDIlib_frame_type_error:
+                exit_loop = true;
+                break;
+            case NDIlib_frame_type_video:
+                clock_gettime(CLOCK_REALTIME, &last_frame_time);
+                if (enable_debugging) {
+                    fprintf(stderr, "Video frame\n");
+                }
+                if (!drawFrame(&video_recv)) {
+                    // The framebuffer configuration failed.  We can't do anything.
+                    exit_loop = true;
+                }
+                NDIlib_recv_free_video_v2(pNDI_recv, &video_recv);
+                break;
+            case NDIlib_frame_type_status_change:
+                g_ptzEnabled = NDIlib_recv_ptz_is_supported(pNDI_recv);
+                break;
 #ifdef ENABLE_AUDIO
-                case NDIlib_frame_type_audio:
-                    // Do something with the audio here.
-                    NDIlib_recv_free_audio_v2(pNDI_recv, &audio_recv);
+            case NDIlib_frame_type_audio:
+                // Do something with the audio here.
+                NDIlib_recv_free_audio_v2(pNDI_recv, &audio_recv);
 #endif
-                default:
-                    if (enable_debugging) {
-                        fprintf(stderr, "Unknown frame type %d.\n", frameType);
-                    }
-            }
-            if (g_ptzEnabled
+            default:
+                if (enable_debugging) {
+                    fprintf(stderr, "Unknown frame type %d.\n", frameType);
+                }
+        }
+        if (g_ptzEnabled
 #ifdef INCLUDE_VISCA
-                || enable_visca
+            || enable_visca
 #endif
-               ) {
+           ) {
 #ifdef USE_AVAHI
-                if (enable_visca) {
-                    if (avahi_simple_poll_iterate(g_avahi_simple_poll, 0) != 0) {
-                        // Something went horribly wrong.  Just null out the references and start over.
-                        g_avahi_simple_poll = NULL;
-                        g_avahi_client = NULL;
-                        g_avahi_service_browser = NULL;
+            if (enable_visca) {
+                if (avahi_simple_poll_iterate(g_avahi_simple_poll, 0) != 0) {
+                    // Something went horribly wrong.  Just null out the references and start over.
+                    g_avahi_simple_poll = NULL;
+                    g_avahi_client = NULL;
+                    g_avahi_service_browser = NULL;
     
-                        enable_visca = connectVISCA(stream_name);
-                    }
+                    enable_visca = connectVISCA(stream_name);
                 }
+            }
 #else
-                if (g_browseRef != NULL) {
-                    DNSServiceProcessResult(g_browseRef);
-                }
-                if (g_resolveRef != NULL) {
-                    DNSServiceProcessResult(g_resolveRef);
-                }
-                if (g_lookupRef != NULL) {
-                    DNSServiceProcessResult(g_lookupRef);
-                }
+            if (g_browseRef != NULL) {
+                DNSServiceProcessResult(g_browseRef);
+            }
+            if (g_resolveRef != NULL) {
+                DNSServiceProcessResult(g_resolveRef);
+            }
+            if (g_lookupRef != NULL) {
+                DNSServiceProcessResult(g_lookupRef);
+            }
 #endif
-                sendPTZUpdates(pNDI_recv);
-            } else {
-                if (enable_debugging) {
-                    fprintf(stderr, "PTZ Disabled\n");
-                }
-            }
-        }
-
-        if (pNDI_recv != nullptr) {
-            // Clean up the NDI receiver (stops packet transmission).
-
-            printf("Closing the connection.\n");
-            p_NDILib->NDIlib_recv_connect(pNDI_recv, NULL);
-
-            printf("Destroying the NDI receiver.\n");
-            p_NDILib->NDIlib_recv_destroy(pNDI_recv);
-            printf("The NDI receiver has been destroyed.\n");
-        }
-}
-
-void truncate_name_before_ip(char *name) {
-    for (char *pos = &name[strlen(name) - 1] ; pos >= name; pos--) {
-        if (*pos == ',') {
-            *pos = '\0';
-            break;
-        }
-    }
-}
-
-bool source_name_compare(const char *name1, const char *name2, bool use_fallback) {
-    if (!use_fallback) {
-        return !strcmp(name1, name2);
-    }
-
-    char *truncname1 = NULL, *truncname2 = NULL;
-    asprintf(&truncname1, "%s", name1);
-    asprintf(&truncname2, "%s", name2);
-    truncate_name_before_ip(truncname1);
-    truncate_name_before_ip(truncname2);
-
-    bool retval = !strcmp(truncname1, truncname2);
-    fprintf(stderr, "CMP \"%s\" ?= \"%s\" : %s\n", truncname1, truncname2,
-            retval ? "true" : "false");
-    return retval;
-}
-
-uint32_t find_named_source(const NDIlib_source_t *p_sources,
-                           uint32_t no_sources,
-                           char *stream_name,
-                           bool use_fallback) {
-    for (int i = 0; i < no_sources; i++) {
-        if (stream_name) {
-            if (source_name_compare(p_sources[i].p_ndi_name, stream_name, use_fallback)) {
-                if (enable_debugging) {
-                    fprintf(stderr, "Chose \"%s\"\n", p_sources[i].p_ndi_name);
-                }
-                return i;
-            } else if (enable_debugging) {
-                fprintf(stderr, "Not \"%s\"\n", p_sources[i].p_ndi_name);
-            }
+            sendPTZUpdates(pNDI_recv);
         } else {
-            fprintf(stderr, "    \"%s\"\n", p_sources[i].p_ndi_name);
+            if (enable_debugging) {
+                fprintf(stderr, "PTZ Disabled\n");
+            }
         }
     }
-    return -1;
+    return NULL;
 }
 
 bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
@@ -988,6 +1009,8 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
     }
 
 #endif
+
+#pragma mark - VISCA Service Discovery
 
 #ifdef INCLUDE_VISCA
 
@@ -1317,6 +1340,8 @@ void handleDNSServiceGetAddrInfoReply(DNSServiceRef sdRef,
 }
 
 #endif // USE_AVAHI
+
+#pragma mark - VISCA Core
 
 int connectToVISCAPortWithAddress(const struct sockaddr *address) {
     struct sockaddr_in sa;
@@ -1695,6 +1720,8 @@ uint8_t get_ack(int sock, int timeout_usec) {
 
 #endif
 
+#pragma mark - PTZ Core
+
 void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     pthread_mutex_lock(&g_motionMutex);
     motionData_t copyOfMotionData = g_motionData;
@@ -1741,6 +1768,8 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     }
     lastMotionData = copyOfMotionData;
 }
+
+#pragma mark - Button and joystick input
 
 #ifndef DEMO_MODE
 /*
@@ -2210,6 +2239,102 @@ void *runPTZThread(void *argIgnored) {
     }
 }
 
+#pragma mark - Source management
+
+void free_receiver_item(receiver_array_item_t receiver_item) {
+    free(receiver_item->name);
+    free(receiver_item->thread_data->stream_name);
+    free(receiver_item->thread_data);
+    free(receiver_item);
+}
+
+void truncate_name_before_ip(char *name) {
+    for (char *pos = &name[strlen(name) - 1] ; pos >= name; pos--) {
+        if (*pos == ',') {
+            *pos = '\0';
+            break;
+        }
+    }
+}
+
+bool source_name_compare(const char *name1, const char *name2, bool use_fallback) {
+    if (!use_fallback) {
+        return !strcmp(name1, name2);
+    }
+
+    char *truncname1 = NULL, *truncname2 = NULL;
+    asprintf(&truncname1, "%s", name1);
+    asprintf(&truncname2, "%s", name2);
+    truncate_name_before_ip(truncname1);
+    truncate_name_before_ip(truncname2);
+
+    bool retval = !strcmp(truncname1, truncname2);
+    if (enable_verbose_debugging) {
+        fprintf(stderr, "CMP \"%s\" ?= \"%s\" : %s\n", truncname1, truncname2,
+                retval ? "true" : "false");
+    }
+    free(truncname1);
+    free(truncname2);
+    return retval;
+}
+
+uint32_t find_named_source(const NDIlib_source_t *p_sources,
+                           uint32_t no_sources,
+                           char *stream_name,
+                           bool use_fallback) {
+    for (int i = 0; i < no_sources; i++) {
+        if (stream_name) {
+            if (source_name_compare(p_sources[i].p_ndi_name, stream_name, use_fallback)) {
+                if (enable_debugging) {
+                    fprintf(stderr, "Chose \"%s\"\n", p_sources[i].p_ndi_name);
+                }
+                return i;
+            } else if (enable_debugging) {
+                fprintf(stderr, "Not \"%s\"\n", p_sources[i].p_ndi_name);
+            }
+        } else {
+            fprintf(stderr, "    \"%s\"\n", p_sources[i].p_ndi_name);
+        }
+    }
+    return -1;
+}
+
+bool sourceIsActiveForName(const char *source_name) {
+    for (receiver_array_item_t check_item = g_active_receivers;
+        check_item != NULL;
+        check_item = check_item->next) {
+        if (!strcmp(check_item->name, source_name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+#pragma mark - Formatting
+
+char fmtnibble(uint8_t nibble) {
+    if (nibble <= 9) return '0' + nibble;
+    return 'A' - 10 + nibble;
+}
+
+char *fmtbuf(uint8_t *buf, ssize_t bufsize) {
+    static char *retval = NULL;
+    if (retval != NULL) {
+        free(retval);
+        retval = NULL;
+    }
+    retval = (char *)malloc(bufsize * 3);
+    for (ssize_t i = 0 ; i < bufsize; i++) {
+        retval[i * 3] = fmtnibble(buf[i] >> 4);
+        retval[(i * 3) + 1] = fmtnibble(buf[i] & 0xf);
+        retval[(i * 3) + 2] = ' ';
+    }
+    retval[(bufsize * 3) - 1] = '\0';
+    return retval;
+}
+
+#pragma mark - Tests
+
 #ifdef DEMO_MODE
 void demoPTZValues(void) {
     motionData_t motionData;
@@ -2245,27 +2370,6 @@ void demoPTZValues(void) {
     motionData.storePositionNumber = 0; setMotionData(motionData); usleep(1000000);
 }
 #endif
-
-char fmtnibble(uint8_t nibble) {
-    if (nibble <= 9) return '0' + nibble;
-    return 'A' - 10 + nibble;
-}
-
-char *fmtbuf(uint8_t *buf, ssize_t bufsize) {
-    static char *retval = NULL;
-    if (retval != NULL) {
-        free(retval);
-        retval = NULL;
-    }
-    retval = (char *)malloc(bufsize * 3);
-    for (ssize_t i = 0 ; i < bufsize; i++) {
-        retval[i * 3] = fmtnibble(buf[i] >> 4);
-        retval[(i * 3) + 1] = fmtnibble(buf[i] & 0xf);
-        retval[(i * 3) + 2] = ' ';
-    }
-    retval[(bufsize * 3) - 1] = '\0';
-    return retval;
-}
 
 void testDebounce(void);
 void runUnitTests(void) {
