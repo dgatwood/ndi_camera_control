@@ -107,6 +107,7 @@ bool enable_verbose_debugging = false;
 /* Enable VISCA-over-IP camera control. */
 #ifdef INCLUDE_VISCA
 bool enable_visca = false;
+bool visca_running = false;
 #endif
 
 #pragma mark - Constants and types
@@ -483,12 +484,6 @@ int main(int argc, char *argv[]) {
 #endif
     }
 
-#ifdef INCLUDE_VISCA
-    if (enable_visca) {
-        enable_visca = connectVISCA(stream_name);
-    }
-#endif
-
 #ifdef __linux__
 #ifndef DEMO_MODE
     io_expander = newIOExpander(I2C_ADDRESS, 0, -1, 0, false);
@@ -618,6 +613,15 @@ int main(int argc, char *argv[]) {
                         if (pthread_create(&receiver_item->receiver_thread, NULL, runNDIRunLoop, thread_data) == 0) {
                             g_active_receivers = receiver_item;
                             fprintf(stderr, "Connected.\n");
+#ifdef INCLUDE_VISCA
+                            if (g_visca_sock != -1) {
+                                close(g_visca_sock);
+                                g_visca_sock = -1;
+                            }
+                            if (enable_visca) {
+                                visca_running = connectVISCA(stream_name);
+                            }
+#endif
                         } else {
                             free_receiver_item(receiver_item);
                         }
@@ -745,7 +749,7 @@ void *runNDIRunLoop(void *receiver_thread_data_ref) {
                     g_avahi_client = NULL;
                     g_avahi_service_browser = NULL;
     
-                    enable_visca = connectVISCA(stream_name);
+                    visca_running = connectVISCA(stream_name);
                 }
             }
 #else
@@ -1101,6 +1105,10 @@ void avahi_browse_callback(AvahiServiceBrowser *browser,
             fprintf(stderr, "Avahi browser failed: %s\n",
                     avahi_strerror(avahi_client_errno(avahi_service_browser_get_client(browser))));
             avahi_simple_poll_quit(g_avahi_simple_poll);
+            // Leak on error.
+            g_avahi_simple_poll = NULL;
+            g_avahi_client = NULL;
+            g_avahi_service_browser = NULL;
             return;
         case AVAHI_BROWSER_NEW:
             if (source_name_compare(name, stream_name, true)) {
@@ -1737,7 +1745,7 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     }
 
 #ifdef INCLUDE_VISCA
-    if (!enable_visca || g_visca_sock == -1) {
+    if (!visca_running || g_visca_sock == -1) {
 #endif
         NDIlib_recv_ptz_zoom_speed(pNDI_recv, -copyOfMotionData.zoomPosition);
 #ifdef INCLUDE_VISCA
@@ -1745,7 +1753,7 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
 #endif
 
 #ifdef USE_VISCA_FOR_PAN_AND_TILT
-    if (!enable_visca || g_visca_sock == -1) {
+    if (!visca_running || g_visca_sock == -1) {
 #endif
         NDIlib_recv_ptz_pan_tilt_speed(pNDI_recv, copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
 
@@ -1999,7 +2007,7 @@ void updatePTZValues() {
 
     setMotionData(newMotionData);
 #ifdef INCLUDE_VISCA
-    if (enable_visca) {
+    if (visca_running) {
         sendPTZUpdatesOverVISCA(&newMotionData);
     }
 #endif
