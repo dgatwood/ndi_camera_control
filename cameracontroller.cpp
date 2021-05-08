@@ -904,20 +904,24 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
             return false;
         }
 
-        static void *tempBuf = NULL;
         ssize_t screenSize = g_framebufferActiveConfiguration.xres *
                              g_framebufferActiveConfiguration.yres *
                              monitor_bytes_per_pixel;
-        if (tempBuf == NULL) {
-            tempBuf = mmap(0, screenSize, PROT_READ | PROT_WRITE,
-                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        }
         if (g_xScaleFactor == 1.0 && g_yScaleFactor == 1.0 && monitor_bytes_per_pixel == 4 && !force_slow_path) {
             if (enable_verbose_debugging) {
                 fprintf(stderr, "fastpath\n");
             }
+            int zero = 0;
+            if (ioctl(g_framebufferFileHandle, FBIO_WAITFORVSYNC, &zero) == -1) {
+                perror("cameracontroller:  FBIO_WAITFORVSYNC");
+            }
             bcopy(video_recv->p_data, g_framebufferBase, (video_recv->xres * video_recv->yres * 4));
         } else {
+            static void *tempBuf = NULL;
+            if (tempBuf == NULL) {
+                tempBuf = mmap(0, screenSize, PROT_READ | PROT_WRITE,
+                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            }
             if (enable_verbose_debugging) {
                 fprintf(stderr, "slowpath (%f / %f)\n", g_xScaleFactor, g_yScaleFactor);
             }
@@ -949,15 +953,15 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
                     }
                 }
             }
+            int zero = 0;
+            if (ioctl(g_framebufferFileHandle, FBIO_WAITFORVSYNC, &zero) == -1) {
+                perror("cameracontroller:  FBIO_WAITFORVSYNC");
+            }
+            bcopy(tempBuf, g_framebufferBase, screenSize);
         }
         // memset(g_framebufferBase, 0xffffffff, (video_recv->xres * video_recv->yres * 2));
         // memset(g_framebufferBase, 0xffffffff, (video_recv->xres * video_recv->yres * 2));
 
-        int zero = 0;
-        if (ioctl(g_framebufferFileHandle, FBIO_WAITFORVSYNC, &zero) == -1) {
-            perror("cameracontroller:  FBIO_WAITFORVSYNC");
-        }
-        bcopy(tempBuf, g_framebufferBase, screenSize);
 
         return true;
     }
