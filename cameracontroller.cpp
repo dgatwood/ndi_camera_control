@@ -682,7 +682,7 @@ int main(int argc, char *argv[]) {
         });
     });
     NSApplicationLoad();
-    CFRunLoopRun(pNDI_recv, stream_name);
+    CFRunLoopRun();
 #endif
 }
 
@@ -2151,6 +2151,7 @@ bool configureGPIO(void) {
     return true;
 }
 
+#ifdef __linux__
 uint8_t dutyCycle(int pin) {
     double adjustment = 1.0;
     switch(pin) {
@@ -2199,8 +2200,9 @@ bool cc_gpio_write(int pi, unsigned gpio, unsigned level) {
         return gpio_write(pi, gpio, level);
     }
 }
+#endif // __linux__
 
-#endif
+#endif // !DEMO_MODE
 
 void setMotionData(motionData_t newMotionData) {
     /*
