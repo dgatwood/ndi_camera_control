@@ -8,8 +8,9 @@
 
 #include <math.h>
 #include <sys/ioctl.h>
-#include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -23,6 +24,7 @@
 #include <Processing.NDI.Lib.h>
 
 #define VISCA_ACK_TIMEOUT 100000  /* 100 msec */
+#define MIN_TALLY_INTERVAL 100000 /* 100 msec */
 #define PULSES_PER_BLINK 2
 
 static float kCenterMotionThreshold = 0.05;
@@ -1437,6 +1439,17 @@ void send_visca_packet(uint8_t *buf, ssize_t bufsize, int timeout_usec);
 uint8_t *send_visca_inquiry(uint8_t *buf, ssize_t bufsize, int timeout_usec, ssize_t *responseLength);
 
 void updateTallyLightsOverVISCA(void) {
+    static struct timeval lastCheck = { 0, 0 };
+    struct timeval curTime;
+
+    gettimeofday(&curTime, NULL);
+
+    uint64_t difference = (curTime.tv_usec - lastCheck.tv_usec) +
+        ((curTime.tv_sec != lastCheck.tv_sec) ? 1000000 : 0);
+
+    if (difference < MIN_TALLY_INTERVAL) return;
+    lastCheck = curTime;
+
     uint8_t buf[7] = { 0x81, 0x09, 0x7E, 0x01, 0x0A, 0x01, 0xFF };
     // uint8_t buf[7] = { 0x81, 0x09, 0x00, 0x02, 0x00, 0x00, 0xFF };  // Firmware version command.
     ssize_t responseLength = 0;
