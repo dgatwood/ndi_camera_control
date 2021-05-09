@@ -1235,18 +1235,24 @@ bool connectVISCA(char *stream_name) {
     }
     // Start browsing for the service.
     fprintf(stderr, "Starting browser.\n");
-    DNSServiceErrorType errorCode =
-        DNSServiceBrowse(&g_browseRef, 0, 0,
-                         "_ndi._tcp",
-                         NULL,
-                         &handleDNSServiceBrowseReply,
-                         (void *)stream_name);
-    if (errorCode != kDNSServiceErr_NoError) {
-        fprintf(stderr, "Could not start service browser for VISCA (error %d)\n", errorCode);
-        return false;
+
+    // Try several times, because this API sometimes fails at random with
+    // errno = EPERM (operation not permitted).
+    for (int i = 0 ; i < 5; i++) {
+        DNSServiceErrorType errorCode =
+            DNSServiceBrowse(&g_browseRef, 0, 0,
+                             "_ndi._tcp",
+                             NULL,
+                             &handleDNSServiceBrowseReply,
+                             (void *)stream_name);
+        if (errorCode != kDNSServiceErr_NoError) {
+            perror("cameracontroller");
+            fprintf(stderr, "Could not start service browser for VISCA (error %d)\n", errorCode);
+        } else {
+            return true;
+        }
     }
-    fprintf(stderr, "Started.\n");
-    return true;
+    return false;
 }
 
 void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
@@ -1692,20 +1698,27 @@ uint8_t *get_ack_data(int sock, int timeout_usec, ssize_t *len) {
     tv.tv_sec = 0;
     tv.tv_usec = timeout_usec;
     ssize_t received_length = 0;
-    if (select(g_visca_sock + 1, &readfds, NULL, NULL, &tv) > 0) {
-        if (enable_verbose_debugging) {
-            fprintf(stderr, "Calling recvfrom\n");
+    bool should_continue = true;
+    do {
+        int sock = select(g_visca_sock + 1, &readfds, NULL, NULL, &tv);
+        if (sock > 0) {
+            if (enable_verbose_debugging) {
+                fprintf(stderr, "Calling recvfrom\n");
+            }
+            received_length = recvfrom(g_visca_sock, buf, sizeof(buf),
+               0, NULL, NULL);
+            if (enable_verbose_debugging) {
+                fprintf(stderr, "Done (len = %llu).\n", (unsigned long long)received_length);
+            }
+            break;
+        } else if (sock == -1 && errno != EINTR) {
+            fprintf(stderr, "Timed out waiting for ack from camera.\n");
+            *len = 0;
+            return NULL;
+        } else {
+            if (enable_verbose_debugging) { fprintf(stderr, "EINTR\n"); }
         }
-        received_length = recvfrom(g_visca_sock, buf, sizeof(buf),
-           0, NULL, NULL);
-        if (enable_verbose_debugging) {
-            fprintf(stderr, "Done (len = %llu).\n", (unsigned long long)received_length);
-        }
-    } else {
-        fprintf(stderr, "Timed out waiting for ack from camera.\n");
-        *len = 0;
-        return NULL;
-    }
+    } while (!exit_app);
 
     uint8_t *ack = (uint8_t *)malloc(received_length);
     bcopy(buf, ack, received_length);
