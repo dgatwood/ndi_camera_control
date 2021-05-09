@@ -934,23 +934,19 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
         ssize_t screenSize = g_framebufferActiveConfiguration.xres *
                              g_framebufferActiveConfiguration.yres *
                              monitor_bytes_per_pixel;
+        static unsigned char *tempBuf = NULL;
+        if (tempBuf == NULL) {
+            tempBuf = (unsigned char *)mmap(0, screenSize, PROT_READ | PROT_WRITE,
+                                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        }
         if (g_xScaleFactor == 1.0 && g_yScaleFactor == 1.0 && monitor_bytes_per_pixel == 4 && !force_slow_path) {
             if (enable_verbose_debugging) {
                 fprintf(stderr, "fastpath\n");
             }
-            int zero = 0;
-            if (ioctl(g_framebufferFileHandle, FBIO_WAITFORVSYNC, &zero) == -1) {
-                perror("cameracontroller:  FBIO_WAITFORVSYNC");
-            }
 
-            bcopy(video_recv->p_data, g_framebufferBase, (video_recv->xres * video_recv->yres * 4));
-            drawOnScreenLights(g_framebufferBase, g_framebufferXRes, g_framebufferYRes, monitor_bytes_per_pixel);
+            bcopy(video_recv->p_data, tempBuf, screenSize);
+            drawOnScreenLights(tempBuf, g_framebufferXRes, g_framebufferYRes, monitor_bytes_per_pixel);
         } else {
-            static void *tempBuf = NULL;
-            if (tempBuf == NULL) {
-                tempBuf = mmap(0, screenSize, PROT_READ | PROT_WRITE,
-                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-            }
             if (enable_verbose_debugging) {
                 fprintf(stderr, "slowpath (%f / %f)\n", g_xScaleFactor, g_yScaleFactor);
             }
@@ -982,17 +978,14 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
                     }
                 }
             }
-            drawOnScreenLights(g_framebufferBase, g_framebufferXRes, g_framebufferYRes, monitor_bytes_per_pixel);
-
-            int zero = 0;
-            if (ioctl(g_framebufferFileHandle, FBIO_WAITFORVSYNC, &zero) == -1) {
-                perror("cameracontroller:  FBIO_WAITFORVSYNC");
-            }
-            bcopy(tempBuf, g_framebufferBase, screenSize);
+            drawOnScreenLights(tempBuf, g_framebufferXRes, g_framebufferYRes, monitor_bytes_per_pixel);
         }
-        // memset(g_framebufferBase, 0xffffffff, (video_recv->xres * video_recv->yres * 2));
-        // memset(g_framebufferBase, 0xffffffff, (video_recv->xres * video_recv->yres * 2));
 
+        int zero = 0;
+        if (ioctl(g_framebufferFileHandle, FBIO_WAITFORVSYNC, &zero) == -1) {
+            perror("cameracontroller:  FBIO_WAITFORVSYNC");
+        }
+        bcopy(tempBuf, g_framebufferBase, screenSize);
 
         return true;
     }
@@ -1078,8 +1071,6 @@ void drawOnScreenLights(unsigned char *framebuffer_base, int xres, int yres, int
             (g_camera_preview && !g_camera_malfunctioning) ? onScreenLightColorGreen :
             (g_camera_malfunctioning) ? onScreenLightColorBlue :
             onScreenLightColorClear;
-
-fprintf(stderr, "SC: %d\n", statusColor);
 
         if (statusColor != onScreenLightColorClear) {
             drawOnScreenLight(framebuffer_base, xres, bytes_per_pixel,
