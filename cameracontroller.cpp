@@ -22,7 +22,7 @@
 
 #include <Processing.NDI.Lib.h>
 
-
+#define VISCA_ACK_TIMEOUT 100000  /* 100 msec */
 #define PULSES_PER_BLINK 2
 
 static float kCenterMotionThreshold = 0.05;
@@ -34,7 +34,7 @@ static float kCenterMotionThreshold = 0.05;
 #ifdef __linux__
 #define USE_AVAHI
 #include <pigpiod_if2.h>
-#endif
+#endif // __linux__
 
 #ifdef INCLUDE_VISCA
     #include <arpa/inet.h>
@@ -108,7 +108,7 @@ bool enable_verbose_debugging = false;
 #ifdef INCLUDE_VISCA
 bool enable_visca = false;
 bool visca_running = false;
-#endif
+#endif // INCLUDE_VISCA
 
 #pragma mark - Constants and types
 
@@ -127,9 +127,9 @@ bool visca_running = false;
 /* LED duty cycle. */
 uint8_t base_duty_cycle = 255;
 
-#endif
+#endif // __linux__
 
-#define MAX_BUTTONS 6  // Theoretically, 9, but I don't want to build that much hardware.  Numbered 1 to 6.
+#define MAX_BUTTONS 5  // Theoretically, 9, but I don't want to build that much hardware.  Numbered 1 to 5.
 #define BUTTON_SET 0   // If the set button is held down, we store a value for that button instead of retrieving it.
 
 typedef struct {
@@ -326,6 +326,7 @@ uint32_t find_named_source(const NDIlib_source_t *p_sources,
                            bool use_fallback);
 bool source_name_compare(const char *name1, const char *name2, bool use_fallback);
 bool sourceIsActiveForName(const char *source_name);
+receiver_array_item_t new_receiver_array_item(void);
 void free_receiver_item(receiver_array_item_t receiver_item);
 void *runNDIRunLoop(void *receiver_thread_data_ref);
 char *fmtbuf(uint8_t *buf, ssize_t size);
@@ -600,7 +601,7 @@ int main(int argc, char *argv[]) {
                     };
                     NDIlib_recv_instance_t pNDI_recv = NDIlib_recv_create_v3(&NDI_recv_create_desc);
                     if (pNDI_recv) {
-                        receiver_array_item_t receiver_item = (receiver_array_item_t)malloc(sizeof(*receiver_item));
+                        receiver_array_item_t receiver_item = new_receiver_array_item();
                         receiver_item->receiver = pNDI_recv;
                         asprintf(&receiver_item->name, "%s", found_source_name);
                         receiver_item->next = g_active_receivers;
@@ -684,6 +685,12 @@ int main(int argc, char *argv[]) {
     NSApplicationLoad();
     CFRunLoopRun();
 #endif
+}
+
+receiver_array_item_t new_receiver_array_item(void) {
+    receiver_array_item_t receiver_item = (receiver_array_item_t)malloc(sizeof(*receiver_item));
+    bzero(receiver_item, sizeof(*receiver_item));
+    return receiver_item;
 }
 
 #pragma mark - Video rendering
@@ -1582,7 +1589,7 @@ uint8_t *send_visca_inquiry(uint8_t *buf, ssize_t bufsize, int timeout_usec, ssi
     send_visca_packet_raw(buf, bufsize, timeout_usec, true);
     int udp_offset = g_visca_use_udp ? 8 : 0;
     ssize_t localResponseLength = 0;
-    uint8_t *response = get_ack_data(g_visca_sock, 100000, &localResponseLength);
+    uint8_t *response = get_ack_data(g_visca_sock, VISCA_ACK_TIMEOUT, &localResponseLength);
     bool valid = false;
     while (!valid) {
         valid = true;
@@ -1613,7 +1620,7 @@ uint8_t *send_visca_inquiry(uint8_t *buf, ssize_t bufsize, int timeout_usec, ssi
         }
         if (!valid) {
             free(response);
-            response = get_ack_data(g_visca_sock, 100000, &localResponseLength);
+            response = get_ack_data(g_visca_sock, VISCA_ACK_TIMEOUT, &localResponseLength);
         }
     }
     uint8_t *returnValue = (uint8_t *)malloc(localResponseLength - udp_offset);
@@ -1735,9 +1742,7 @@ uint8_t get_ack(int sock, int timeout_usec) {
 #pragma mark - PTZ Core
 
 void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
-    pthread_mutex_lock(&g_motionMutex);
-    motionData_t copyOfMotionData = g_motionData;
-    pthread_mutex_unlock(&g_motionMutex);
+    motionData_t copyOfMotionData = getMotionData();
 
     // We want to send a "set position X" or "retrieve position X" message only once.  To do this, we
     // keep track of the last set/retrieve command sent, and if the value hasn't changed, we zero
