@@ -58,6 +58,8 @@ static float kCenterMotionThreshold = 0.05;
 // This must be set correctly in Linux, because the NDI library is bizarre.
 #define NDI_LIBRARY_PATH "/usr/local/NDISDK/lib/arm-rpi3-linux-gnueabihf/libndi.so.4"
 
+#include "LightConfiguration.h"
+
 #ifdef __linux__
     #include <linux/kd.h>
     #include <linux/vt.h>
@@ -85,6 +87,11 @@ static float kCenterMotionThreshold = 0.05;
 
 int monitor_bytes_per_pixel = 4;
 bool force_slow_path = false;  // For debugging.
+
+#if __linux__
+// Always false in macOS.
+bool g_use_on_screen_lights = false;
+#endif // __linux__
 
 /*
  * Controlled by the -f (--fast) flag.
@@ -141,6 +148,7 @@ typedef struct {
     int storePositionNumber;    // Set button is down along with a number button (sent once/debounced).
     int retrievePositionNumber; // A number button is down by itself (sent once/debounced).
     bool setMode;               // True if pushing a button should set the state rather than retrieving it.
+    int light[MAX_BUTTONS + 1]; // The current light state (0 .. MAX_BUTTONS)
 
     // Debounce support.
     bool setButtonDown;         // True if set button is down.
@@ -218,6 +226,7 @@ int8_t g_manual_shutter = 0;
 
 bool g_camera_active = false;
 bool g_camera_preview = false;
+bool g_camera_malfunctioning = false;
 
  
 // Specs are for Marshall cameras.  Other cameras may differ.
@@ -333,6 +342,7 @@ receiver_array_item_t new_receiver_array_item(void);
 void free_receiver_item(receiver_array_item_t receiver_item);
 void *runNDIRunLoop(void *receiver_thread_data_ref);
 char *fmtbuf(uint8_t *buf, ssize_t size);
+void drawOnScreenLights(unsigned char *framebuffer_base, int xres, int yres, int bytes_per_pixel);
 
 #ifdef INCLUDE_VISCA
     bool connectVISCA(char *stream_name);
@@ -387,6 +397,13 @@ int main(int argc, char *argv[]) {
             }
         }
 #endif  // __linux__
+#if __linux__
+        // Always enabled in macOS.
+        if (!strcmp(argv[i], "-O") || !strcmp(argv[i], "--onscreenlights")) {
+            fprintf(stderr, "Enabling on-screen (emulated) status lights.\n");
+            g_use_on_screen_lights = true;
+        }
+#endif // __linux__
         if (!strcmp(argv[i], "-B") || !strcmp(argv[i], "--buttondebug")) {
             fprintf(stderr, "Enabling PTZ debugging.\n");
             enable_button_debugging = true;
@@ -871,7 +888,6 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
 #endif
 }
 
-#ifdef __linux__
     uint16_t convert_sample_to_16bpp(uint32_t sample) {
         // Input:  0xAA RR GG BB          // 32-bit LE integer: 8 bits each for ARGB (alpha high).
         // Output: 0brrrrr gggggg bbbbb;  // 16-bit LE integer: 5 R, 6 G, 5 B (red high).
@@ -883,6 +899,7 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
 
     }
 
+#ifdef __linux__
     // This is a really weak scaling algorithm, intended to be as fast as possible, to leave
     // as much CPU as possible free for decoding whatever crazy resolution or profile of H.264
     // (or worse, H.265) the camera might throw in our direction.  Experimentally, the overhead
@@ -925,7 +942,9 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
             if (ioctl(g_framebufferFileHandle, FBIO_WAITFORVSYNC, &zero) == -1) {
                 perror("cameracontroller:  FBIO_WAITFORVSYNC");
             }
+
             bcopy(video_recv->p_data, g_framebufferBase, (video_recv->xres * video_recv->yres * 4));
+            drawOnScreenLights(g_framebufferBase, g_framebufferXRes, g_framebufferYRes, monitor_bytes_per_pixel);
         } else {
             static void *tempBuf = NULL;
             if (tempBuf == NULL) {
@@ -963,6 +982,8 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
                     }
                 }
             }
+            drawOnScreenLights(g_framebufferBase, g_framebufferXRes, g_framebufferYRes, monitor_bytes_per_pixel);
+
             int zero = 0;
             if (ioctl(g_framebufferFileHandle, FBIO_WAITFORVSYNC, &zero) == -1) {
                 perror("cameracontroller:  FBIO_WAITFORVSYNC");
@@ -1014,19 +1035,124 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
             return false;
         }
         dispatch_sync(dispatch_get_main_queue(), ^{
-            CGContextRef bitmapBuffer = CGBitmapContextCreateWithData(video_recv->p_data, video_recv->xres, video_recv->yres,
+            ssize_t bufsize = video_recv->xres * video_recv->yres * 4;
+            unsigned char *datacopy = (unsigned char *)malloc(bufsize);
+            bcopy(video_recv->p_data, datacopy, bufsize);
+
+            drawOnScreenLights(datacopy, video_recv->xres, video_recv->yres, 4);
+
+            CGContextRef bitmapBuffer = CGBitmapContextCreateWithData(datacopy, video_recv->xres, video_recv->yres,
                                                                       8, (video_recv->xres * 4), CGColorSpaceCreateDeviceRGB(),
                                                                       kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little,
                                                                       NULL, NULL);
             CGImageRef imageRef = CGBitmapContextCreateImage(bitmapBuffer);
             NSImage *image = [[NSImage alloc] initWithCGImage:imageRef size:CGSizeMake(video_recv->xres, video_recv->yres)];
             CFRelease(imageRef);
+
             g_mainImageView.image = image;
         });
         return true;
     }
 
 #endif
+
+enum onScreenColor {
+    onScreenLightColorClear = 0,
+    onScreenLightColorRed = 1,
+    onScreenLightColorGreen = 2,
+    onScreenLightColorBlue = 4,
+    onScreenLightColorWhite = 7
+};
+
+void drawOnScreenLight(unsigned char *framebuffer_base, int xres, int bytes_per_pixel,
+                       int min_x, int max_x, int min_y, int max_y, enum onScreenColor color);
+
+void drawOnScreenLights(unsigned char *framebuffer_base, int xres, int yres, int bytes_per_pixel) {
+#if __linux__
+    if (g_use_on_screen_lights) {
+#endif // __linux__
+        motionData_t motionData = getMotionData();
+
+        enum onScreenColor statusColor =
+            (g_camera_active && !g_camera_malfunctioning) ? onScreenLightColorRed :
+            (g_camera_preview && !g_camera_malfunctioning) ? onScreenLightColorGreen :
+            (g_camera_malfunctioning) ? onScreenLightColorBlue :
+            onScreenLightColorClear;
+
+fprintf(stderr, "SC: %d\n", statusColor);
+
+        if (statusColor != onScreenLightColorClear) {
+            drawOnScreenLight(framebuffer_base, xres, bytes_per_pixel,
+                              LIGHT_STATUS_X_MIN(xres), LIGHT_STATUS_X_MAX(xres),
+                              LIGHT_STATUS_Y_MIN(yres), LIGHT_STATUS_Y_MAX(yres), statusColor);
+        }
+        if (motionData.light[0]) {
+            drawOnScreenLight(framebuffer_base, xres, bytes_per_pixel,
+                              LIGHT_0_X_MIN(xres), LIGHT_0_X_MAX(xres),
+                              LIGHT_0_Y_MIN(yres), LIGHT_0_Y_MAX(yres), onScreenLightColorWhite);
+        }
+        if (motionData.light[1]) {
+            drawOnScreenLight(framebuffer_base, xres, bytes_per_pixel,
+                              LIGHT_1_X_MIN(xres), LIGHT_1_X_MAX(xres),
+                              LIGHT_1_Y_MIN(yres), LIGHT_1_Y_MAX(yres), onScreenLightColorWhite);
+        }
+        if (motionData.light[2]) {
+            drawOnScreenLight(framebuffer_base, xres, bytes_per_pixel,
+                              LIGHT_2_X_MIN(xres), LIGHT_2_X_MAX(xres),
+                              LIGHT_2_Y_MIN(yres), LIGHT_2_Y_MAX(yres), onScreenLightColorWhite);
+        }
+        if (motionData.light[3]) {
+            drawOnScreenLight(framebuffer_base, xres, bytes_per_pixel,
+                              LIGHT_3_X_MIN(xres), LIGHT_3_X_MAX(xres),
+                              LIGHT_3_Y_MIN(yres), LIGHT_3_Y_MAX(yres), onScreenLightColorWhite);
+        }
+        if (motionData.light[4]) {
+            drawOnScreenLight(framebuffer_base, xres, bytes_per_pixel,
+                              LIGHT_4_X_MIN(xres), LIGHT_4_X_MAX(xres),
+                              LIGHT_4_Y_MIN(yres), LIGHT_4_Y_MAX(yres), onScreenLightColorWhite);
+        }
+        if (motionData.light[5]) {
+            drawOnScreenLight(framebuffer_base, xres, bytes_per_pixel,
+                              LIGHT_5_X_MIN(xres), LIGHT_5_X_MAX(xres),
+                              LIGHT_5_Y_MIN(yres), LIGHT_5_Y_MAX(yres), onScreenLightColorWhite);
+        }
+#if __linux__
+    }
+#endif // __linux__
+}
+
+void drawLightPixel(unsigned char *framebuffer_base, ssize_t offset, int color, int bytes_per_pixel);
+void drawOnScreenLight(unsigned char *framebuffer_base, int xres, int bytes_per_pixel,
+                       int min_x, int max_x, int min_y, int max_y, enum onScreenColor color) {
+    ssize_t bytes_per_row = (xres * bytes_per_pixel);
+    ssize_t first_row_offset = (bytes_per_row * min_y);
+    ssize_t last_row_offset = (bytes_per_row * (max_y + 1));
+
+    for (ssize_t row_start = first_row_offset; row_start < last_row_offset; row_start += bytes_per_row) {
+        for (ssize_t rowpos = row_start + (min_x * bytes_per_pixel);
+             rowpos < row_start + ((max_x + 1) * bytes_per_pixel);
+             rowpos += bytes_per_pixel) {
+            drawLightPixel(framebuffer_base, rowpos, color, bytes_per_pixel);
+        }
+    }
+}
+
+void drawLightPixel(unsigned char *framebuffer_base, ssize_t offset, int color, int bytes_per_pixel) {
+    bool red = color & onScreenLightColorRed;
+    bool green = color & onScreenLightColorGreen;
+    bool blue = color & onScreenLightColorBlue;
+
+    uint32_t pixelValue = (red ? 0xFF0000 : 0) | (green ? 0x00FF00 : 0) | (blue ? 0x0000FF : 0);
+
+    if (bytes_per_pixel == 4) {
+        uint32_t *pixel = (uint32_t *)(&framebuffer_base[offset]);
+        *pixel = pixelValue;
+    } else {
+        // Assume 2.
+        uint16_t *pixel = (uint16_t *)(&framebuffer_base[offset]);
+        *pixel = convert_sample_to_16bpp(pixelValue);
+    }
+}
 
 #pragma mark - VISCA Service Discovery
 
@@ -2107,12 +2233,23 @@ void updateLights(motionData_t *motionData) {
             onoff[(bool)(litButtons & 0b100000)]); */
 
 #if __linux__
-    cc_gpio_write(g_pig, LED_PIN_WHITE,  (bool)(litButtons & 0b1));      // 0 (white)
-    cc_gpio_write(g_pig, LED_PIN_RED,  (bool)(litButtons & 0b10));     // 1 (red)
-    cc_gpio_write(g_pig, LED_PIN_YELLOW, (bool)(litButtons & 0b100));    // 2 (yellow)
-    cc_gpio_write(g_pig, LED_PIN_GREEN, (bool)(litButtons & 0b1000));   // 3 (green)
-    cc_gpio_write(g_pig, LED_PIN_BLUE, (bool)(litButtons & 0b10000));  // 4 (blue)
-    cc_gpio_write(g_pig, LED_PIN_PURPLE, (bool)(litButtons & 0b100000)); // 5 (black)
+    if (!g_use_on_screen_lights) {
+        cc_gpio_write(g_pig, LED_PIN_WHITE,  (bool)(litButtons & 0b1));      // 0 (white)
+        cc_gpio_write(g_pig, LED_PIN_RED,  (bool)(litButtons & 0b10));       // 1 (red)
+        cc_gpio_write(g_pig, LED_PIN_YELLOW, (bool)(litButtons & 0b100));    // 2 (yellow)
+        cc_gpio_write(g_pig, LED_PIN_GREEN, (bool)(litButtons & 0b1000));    // 3 (green)
+        cc_gpio_write(g_pig, LED_PIN_BLUE, (bool)(litButtons & 0b10000));    // 4 (blue)
+        cc_gpio_write(g_pig, LED_PIN_PURPLE, (bool)(litButtons & 0b100000)); // 5 (black)
+    } else {
+#endif // __linux__
+        motionData->light[0] = (bool)(litButtons & 0b1);      // 0 (white)
+        motionData->light[1] = (bool)(litButtons & 0b10);     // 1 (red)
+        motionData->light[2] = (bool)(litButtons & 0b100);    // 2 (yellow)
+        motionData->light[3] = (bool)(litButtons & 0b1000);   // 3 (green)
+        motionData->light[4] = (bool)(litButtons & 0b10000);  // 4 (blue)
+        motionData->light[5] = (bool)(litButtons & 0b100000); // 5 (black)
+#if __linux__
+    }
 #endif // __linux__
 
     struct timespec current_wallclock_time;
@@ -2122,24 +2259,27 @@ void updateLights(motionData_t *motionData) {
     uint64_t diff = ((current_wallclock_time.tv_sec != last_frame_time.tv_sec) ? 1000000000 : 0) +
         current_wallclock_time.tv_nsec - last_frame_time.tv_nsec;
 
-    bool camera_malfunctioning = diff > 100000000;  // Scream after losing 3 frames.
+    g_camera_malfunctioning = diff > 100000000;  // Scream after losing 3 frames.
 
 #if __linux__
-    // Program/RGB red
-    cc_gpio_write(g_pig, LED_PIN_RGB_RED, g_camera_active && !camera_malfunctioning);
+    if (!g_use_on_screen_lights) {
+        // Program/RGB red
+        cc_gpio_write(g_pig, LED_PIN_RGB_RED, g_camera_active && !g_camera_malfunctioning);
 
-    // Preview/RGB green
-    cc_gpio_write(g_pig, LED_PIN_RGB_GREEN, g_camera_preview && !camera_malfunctioning);
+        // Preview/RGB green
+        cc_gpio_write(g_pig, LED_PIN_RGB_GREEN, g_camera_preview && !g_camera_malfunctioning);
 
-    // Malfunction/RGB blue
-    cc_gpio_write(g_pig, LED_PIN_RGB_BLUE, camera_malfunctioning);
+        // Malfunction/RGB blue
+        cc_gpio_write(g_pig, LED_PIN_RGB_BLUE, g_camera_malfunctioning);
+    }
 #endif // __linux__
 
-    // fprintf(stderr, "Preview: %s Program: %s\n",
-            // onoff[g_camera_preview && !camera_malfunctioning],
-            // onoff[g_camera_active && !camera_malfunctioning]);
 
-    // fprintf(stderr, "Camera: %s\n", camera_malfunctioning ? "MALFUNCTIONING" : "normal");
+    // fprintf(stderr, "Preview: %s Program: %s\n",
+            // onoff[g_camera_preview && !g_camera_malfunctioning],
+            // onoff[g_camera_active && !g_camera_malfunctioning]);
+
+    // fprintf(stderr, "Camera: %s\n", g_camera_malfunctioning ? "MALFUNCTIONING" : "normal");
 
     // fprintf(stderr, "%d %d %d %d\n", current_wallclock_time.tv_nsec, last_frame_time.tv_nsec, current_wallclock_time.tv_sec, last_frame_time.tv_nsec);
 
