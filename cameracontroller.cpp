@@ -191,6 +191,7 @@ enum {
     NSImageView *g_mainImageView = nil;
 #endif  // __linux__
 
+receiver_array_item_t g_shown_sources = NULL;
 receiver_array_item_t g_active_receivers = NULL;
 
 void updateLights(motionData_t *motionData);
@@ -325,7 +326,7 @@ uint32_t find_named_source(const NDIlib_source_t *p_sources,
                            char *stream_name,
                            bool use_fallback);
 bool source_name_compare(const char *name1, const char *name2, bool use_fallback);
-bool sourceIsActiveForName(const char *source_name);
+bool sourceIsActiveForName(const char *source_name, receiver_array_item_t array);
 receiver_array_item_t new_receiver_array_item(void);
 void free_receiver_item(receiver_array_item_t receiver_item);
 void *runNDIRunLoop(void *receiver_thread_data_ref);
@@ -588,7 +589,7 @@ int main(int argc, char *argv[]) {
                 // If so, don't connect again to the same camera.  If not,
                 // reconnect.
                 const char *found_source_name = p_sources[source_number].p_ndi_name;
-                bool is_active = sourceIsActiveForName(found_source_name);
+                bool is_active = sourceIsActiveForName(found_source_name, g_active_receivers);
 
                 if (!is_active) {
                     // Create the receiver
@@ -2325,14 +2326,22 @@ uint32_t find_named_source(const NDIlib_source_t *p_sources,
                 fprintf(stderr, "Not \"%s\"\n", p_sources[i].p_ndi_name);
             }
         } else {
-            fprintf(stderr, "    \"%s\"\n", p_sources[i].p_ndi_name);
+            const char *found_source_name = p_sources[i].p_ndi_name;
+            bool is_shown = sourceIsActiveForName(found_source_name, g_shown_sources);
+            if (!is_shown) {
+                fprintf(stderr, "    \"%s\"\n", found_source_name);
+                receiver_array_item_t receiver_item = new_receiver_array_item();
+                asprintf(&receiver_item->name, "%s", found_source_name);
+                receiver_item->next = g_shown_sources;
+                g_shown_sources = receiver_item;
+            }
         }
     }
     return -1;
 }
 
-bool sourceIsActiveForName(const char *source_name) {
-    for (receiver_array_item_t check_item = g_active_receivers;
+bool sourceIsActiveForName(const char *source_name, receiver_array_item_t array) {
+    for (receiver_array_item_t check_item = array;
         check_item != NULL;
         check_item = check_item->next) {
         if (!strcmp(check_item->name, source_name)) {
