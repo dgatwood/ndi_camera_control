@@ -306,6 +306,7 @@ bool g_camera_malfunctioning = false;
 
 #if __linux__
     pthread_mutex_t g_motionMutex = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER_NP;
+    pthread_mutex_t g_avahiMutex = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER_NP;
 #else
     pthread_mutex_t g_motionMutex = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER;
 #endif
@@ -770,7 +771,13 @@ void *runNDIRunLoop(void *receiver_thread_data_ref) {
            ) {
 #ifdef USE_AVAHI
             if (enable_visca) {
-                if (avahi_simple_poll_iterate(g_avahi_simple_poll, 0) != 0) {
+                int avahi_error = -1;
+                pthread_mutex_lock(&g_avahiMutex);
+                if (g_avahi_simple_poll != NULL) {
+                    avahi_error = avahi_simple_poll_iterate(g_avahi_simple_poll, 0);
+                }
+                pthread_mutex_unlock(&g_avahiMutex);
+                if (avahi_error != 0) {
                     // Something went horribly wrong.  Just null out the references and start over.
                     g_avahi_simple_poll = NULL;
                     g_avahi_client = NULL;
@@ -1179,37 +1186,62 @@ void avahi_browse_callback(AvahiServiceBrowser *browser,
 void handleDNSResponse(const struct sockaddr *address);
 
 bool connectVISCA(char *stream_name) {
-    if (!g_avahi_simple_poll) {
-        if (!(g_avahi_simple_poll = avahi_simple_poll_new())) {
+    pthread_mutex_lock(&g_avahiMutex);
+
+    AvahiSimplePoll *avahi_simple_poll = g_avahi_simple_poll;
+    AvahiClient *avahi_client = g_avahi_client;
+    AvahiServiceBrowser *avahi_service_browser = g_avahi_service_browser;
+
+    if (!avahi_simple_poll) {
+        if (!(avahi_simple_poll = avahi_simple_poll_new())) {
             fprintf(stderr, "Failed to create Avahi run loop.\n");
+            pthread_mutex_unlock(&g_avahiMutex);
             return false;
         }
     }
-    if (g_avahi_client == NULL) {
+    if (avahi_client == NULL) {
         int error;
-        g_avahi_client = avahi_client_new(avahi_simple_poll_get(g_avahi_simple_poll),
+        const AvahiPoll *poll = avahi_simple_poll_get(avahi_simple_poll);
+        if (!poll) {
+            fprintf(stderr, "Avahi poll is broken.\n");
+            avahi_simple_poll_free(avahi_simple_poll);
+            pthread_mutex_unlock(&g_avahiMutex);
+            return false;
+        }
+        avahi_client = avahi_client_new(poll,
                                           (AvahiClientFlags)0,
                                           avahi_client_callback,
                                           NULL,
                                           &error);
-        if (!g_avahi_client) {
+        if (!avahi_client) {
             fprintf(stderr, "Failed to create Avahi client (error %d).\n", error);
+            avahi_simple_poll_free(avahi_simple_poll);
+            pthread_mutex_unlock(&g_avahiMutex);
             return false;
         }
     }
 
-    if (!(g_avahi_service_browser = avahi_service_browser_new(g_avahi_client,
-                                                              AVAHI_IF_UNSPEC,
-                                                              AVAHI_PROTO_UNSPEC,
-                                                              "_ndi._tcp",
-                                                              NULL,
-                                                              (AvahiLookupFlags)0,
-                                                              avahi_browse_callback,
-                                                              stream_name))) {
+    if (!(avahi_service_browser = avahi_service_browser_new(avahi_client,
+                                                            AVAHI_IF_UNSPEC,
+                                                            AVAHI_PROTO_UNSPEC,
+                                                            "_ndi._tcp",
+                                                            NULL,
+                                                            (AvahiLookupFlags)0,
+                                                            avahi_browse_callback,
+                                                            stream_name))) {
         fprintf(stderr, "Failed to create service browser: %s\n",
-                avahi_strerror(avahi_client_errno(g_avahi_client)));
+                avahi_strerror(avahi_client_errno(avahi_client)));
+        avahi_client_free(avahi_client);
+        avahi_simple_poll_free(avahi_simple_poll);
+        pthread_mutex_unlock(&g_avahiMutex);
         return false;
     }
+
+    g_avahi_simple_poll = avahi_simple_poll;
+    g_avahi_client = avahi_client;
+    g_avahi_service_browser = avahi_service_browser;
+
+    pthread_mutex_unlock(&g_avahiMutex);
     return true;
 }
 
