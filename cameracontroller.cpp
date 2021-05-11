@@ -1885,6 +1885,11 @@ uint8_t *get_ack_data(int sock, int timeout_usec, ssize_t *len) {
         }
     } while (!exit_app && retries-- > 0);
 
+    if (received_length == 0) {
+        *len = 0;
+        return NULL;
+    }
+
     uint8_t *ack = (uint8_t *)malloc(received_length);
     bcopy(buf, ack, received_length);
     *len = received_length;
