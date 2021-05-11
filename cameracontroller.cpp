@@ -1565,29 +1565,29 @@ int connectToVISCAPortWithAddress(const struct sockaddr *address) {
     return sock;
 }
 
-void updateTallyLightsOverVISCA(void);
-void sendZoomUpdatesOverVISCA(motionData_t *motionData);
-void sendPanTiltUpdatesOverVISCA(motionData_t *motionData);
-void sendExposureCompensationOverVISCA(void);
-void sendManualExposureOverVISCA(void);
+void updateTallyLightsOverVISCA(int sock);
+void sendZoomUpdatesOverVISCA(int sock, motionData_t *motionData);
+void sendPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData);
+void sendExposureCompensationOverVISCA(int sock);
+void sendManualExposureOverVISCA(int sock);
 
 void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
-    updateTallyLightsOverVISCA();
-    sendZoomUpdatesOverVISCA(motionData);
+    updateTallyLightsOverVISCA(g_visca_sock);
+    sendZoomUpdatesOverVISCA(g_visca_sock, motionData);
 #ifdef USE_VISCA_FOR_PAN_AND_TILT
-    sendPanTiltUpdatesOverVISCA(motionData);
+    sendPanTiltUpdatesOverVISCA(g_visca_sock, motionData);
 #endif
 #ifdef USE_VISCA_FOR_EXPOSURE_COMPENSATION
-    sendExposureCompensationOverVISCA();
-    sendManualExposureOverVISCA();
+    sendExposureCompensationOverVISCA(g_visca_sock);
+    sendManualExposureOverVISCA(g_visca_sock);
 #endif
 }
 
 static uint32_t g_visca_sequence_number = 0;
-void send_visca_packet(uint8_t *buf, ssize_t bufsize, int timeout_usec);
-uint8_t *send_visca_inquiry(uint8_t *buf, ssize_t bufsize, int timeout_usec, ssize_t *responseLength);
+void send_visca_packet(int sock, uint8_t *buf, ssize_t bufsize, int timeout_usec);
+uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout_usec, ssize_t *responseLength);
 
-void updateTallyLightsOverVISCA(void) {
+void updateTallyLightsOverVISCA(int sock) {
     static struct timeval lastCheck = { 0, 0 };
     struct timeval curTime;
 
@@ -1602,7 +1602,7 @@ void updateTallyLightsOverVISCA(void) {
     uint8_t buf[7] = { 0x81, 0x09, 0x7E, 0x01, 0x0A, 0x01, 0xFF };
     // uint8_t buf[7] = { 0x81, 0x09, 0x00, 0x02, 0x00, 0x00, 0xFF };  // Firmware version command.
     ssize_t responseLength = 0;
-    uint8_t *responseBuf = send_visca_inquiry(buf, sizeof(buf), 20000, &responseLength);
+    uint8_t *responseBuf = send_visca_inquiry(sock, buf, sizeof(buf), 20000, &responseLength);
     if (responseBuf) {
         if (enable_verbose_debugging) {
             fprintf(stderr, "Got tally data: %s\n", fmtbuf(responseBuf, responseLength));
@@ -1623,7 +1623,7 @@ void updateTallyLightsOverVISCA(void) {
     }
 }
 
-void sendZoomUpdatesOverVISCA(motionData_t *motionData) {
+void sendZoomUpdatesOverVISCA(int sock, motionData_t *motionData) {
     uint8_t buf[6] = { 0x81, 0x01, 0x04, 0x07, 0x00, 0xFF };
     int level = (int)(motionData->zoomPosition * 8.9);
 
@@ -1641,10 +1641,10 @@ void sendZoomUpdatesOverVISCA(motionData_t *motionData) {
         fprintf(stderr, "zoom speed: %d buf: 0x%02x\n", level, buf[4]);
     }
 
-    send_visca_packet(buf, sizeof(buf), 100000);
+    send_visca_packet(sock, buf, sizeof(buf), 100000);
 }
 
-void sendPanTiltUpdatesOverVISCA(motionData_t *motionData) {
+void sendPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData) {
     const bool localDebug = false;
     int pan_level = (int)(motionData->xAxisPosition * 24.9);
     int tilt_level = (int)(motionData->yAxisPosition * 23.9);
@@ -1681,10 +1681,10 @@ void sendPanTiltUpdatesOverVISCA(motionData_t *motionData) {
 
     if (localDebug) fprintf(stderr, "Sent packet %s\n", fmtbuf(buf, 9));
 
-    send_visca_packet(buf, sizeof(buf), 100000);
+    send_visca_packet(sock, buf, sizeof(buf), 100000);
 }
 
-void sendManualExposureOverVISCA(void) {
+void sendManualExposureOverVISCA(int sock) {
     bool localDebug = enable_ptz_debugging;
 
     // Send this command only a few times on launch.
@@ -1695,7 +1695,7 @@ void sendManualExposureOverVISCA(void) {
     if (g_set_auto_exposure) {
         if (localDebug) fprintf(stderr, "Enabling automatic exposure.\n");
         uint8_t disablebuf[6] = { 0x81, 0x01, 0x04, 0x39, 0x00, 0xFF };
-        send_visca_packet(disablebuf, sizeof(disablebuf), 100000);
+        send_visca_packet(sock, disablebuf, sizeof(disablebuf), 100000);
         return;
     } else if (!(g_set_manual_iris || g_set_manual_gain || g_set_manual_gain)) {
         return;
@@ -1703,31 +1703,31 @@ void sendManualExposureOverVISCA(void) {
 
     if (localDebug) fprintf(stderr, "Enabling manual exposure.\n");
     uint8_t enablebuf[6] = { 0x81, 0x01, 0x04, 0x39, 0x03, 0xFF };
-    send_visca_packet(enablebuf, sizeof(enablebuf), 100000);
+    send_visca_packet(sock, enablebuf, sizeof(enablebuf), 100000);
 
     if (g_set_manual_iris) {
         if (localDebug) fprintf(stderr, "Setting iris position.\n");
         uint8_t irisbuf[9] = { 0x81, 0x01, 0x04, 0x4B, 0x00, 0x00,
                                (uint8_t)(g_manual_iris >> 4), (uint8_t)(g_manual_iris & 0xF), 0xFF };
-        send_visca_packet(irisbuf, sizeof(irisbuf), 100000);
+        send_visca_packet(sock, irisbuf, sizeof(irisbuf), 100000);
     }
 
     if (g_set_manual_gain) {
         if (localDebug) fprintf(stderr, "Setting gain position.\n");
         uint8_t gainbuf[9] = { 0x81, 0x01, 0x04, 0x4C, 0x00, 0x00,
                                (uint8_t)(g_manual_gain >> 4), (uint8_t)(g_manual_gain & 0xF), 0xFF };
-        send_visca_packet(gainbuf, sizeof(gainbuf), 100000);
+        send_visca_packet(sock, gainbuf, sizeof(gainbuf), 100000);
     }
 
     if (g_set_manual_gain) {
         if (localDebug) fprintf(stderr, "Setting gain position.\n");
         uint8_t gainbuf[9] = { 0x81, 0x01, 0x04, 0x4A, 0x00, 0x00,
                                (uint8_t)(g_manual_gain >> 4), (uint8_t)(g_manual_gain & 0xF), 0xFF };
-        send_visca_packet(gainbuf, sizeof(gainbuf), 100000);
+        send_visca_packet(sock, gainbuf, sizeof(gainbuf), 100000);
     }
 }
 
-void sendExposureCompensationOverVISCA(void) {
+void sendExposureCompensationOverVISCA(int sock) {
     if (!g_set_exposure_compensation) { return; }
 
     // Send this command only a few times on launch.
@@ -1737,28 +1737,28 @@ void sendExposureCompensationOverVISCA(void) {
 
     // Enable exposure compensation.
     uint8_t enablebuf[6] = { 0x81, 0x01, 0x04, 0x3E, (uint8_t)(g_exposure_compensation == 0 ? 0x03 : 0x02), 0xFF };
-    send_visca_packet(enablebuf, sizeof(enablebuf), 100000);
+    send_visca_packet(sock, enablebuf, sizeof(enablebuf), 100000);
 
     // Set compensation amount.
     if (g_exposure_compensation != 0) {
         uint8_t exposure_compensation_scaled = (uint8_t)(g_exposure_compensation + 5); // Range now 0 to 10
         uint8_t buf[9] = { 0x81, 0x01, 0x04, 0x4E, 0x00, 0x00, (uint8_t)((exposure_compensation_scaled >> 4) & 0xf),
                            (uint8_t)(exposure_compensation_scaled & 0xf), 0xFF };
-        send_visca_packet(buf, sizeof(buf), 100000);
+        send_visca_packet(sock, buf, sizeof(buf), 100000);
     }
 }
 
 uint8_t get_ack(int sock, int timeout_usec);
 uint8_t *get_ack_data(int sock, int timeout_usec, ssize_t *len);
-void send_visca_packet_raw(uint8_t *buf, ssize_t bufsize, int timeout_usec, bool isInquiry);
+void send_visca_packet_raw(int sock, uint8_t *buf, ssize_t bufsize, int timeout_usec, bool isInquiry);
 
-uint8_t *send_visca_inquiry(uint8_t *buf, ssize_t bufsize, int timeout_usec, ssize_t *responseLength) {
-    if (g_visca_sock == -1) return NULL;
+uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout_usec, ssize_t *responseLength) {
+    if (sock == -1) return NULL;
 
-    send_visca_packet_raw(buf, bufsize, timeout_usec, true);
+    send_visca_packet_raw(sock, buf, bufsize, timeout_usec, true);
     int udp_offset = g_visca_use_udp ? 8 : 0;
     ssize_t localResponseLength = 0;
-    uint8_t *response = get_ack_data(g_visca_sock, VISCA_ACK_TIMEOUT, &localResponseLength);
+    uint8_t *response = get_ack_data(sock, VISCA_ACK_TIMEOUT, &localResponseLength);
     bool valid = false;
     while (!valid) {
         valid = true;
@@ -1789,7 +1789,7 @@ uint8_t *send_visca_inquiry(uint8_t *buf, ssize_t bufsize, int timeout_usec, ssi
         }
         if (!valid) {
             free(response);
-            response = get_ack_data(g_visca_sock, VISCA_ACK_TIMEOUT, &localResponseLength);
+            response = get_ack_data(sock, VISCA_ACK_TIMEOUT, &localResponseLength);
         }
     }
     uint8_t *returnValue = (uint8_t *)malloc(localResponseLength - udp_offset);
@@ -1799,12 +1799,12 @@ uint8_t *send_visca_inquiry(uint8_t *buf, ssize_t bufsize, int timeout_usec, ssi
     return returnValue;
 }
 
-void send_visca_packet(uint8_t *buf, ssize_t bufsize, int timeout_usec) {
-    send_visca_packet_raw(buf, bufsize, timeout_usec, false);
+void send_visca_packet(int sock, uint8_t *buf, ssize_t bufsize, int timeout_usec) {
+    send_visca_packet_raw(sock, buf, bufsize, timeout_usec, false);
 }
 
-void send_visca_packet_raw(uint8_t *buf, ssize_t bufsize, int timeout_usec, bool isInquiry) {
-    if (g_visca_sock == -1) {
+void send_visca_packet_raw(int sock, uint8_t *buf, ssize_t bufsize, int timeout_usec, bool isInquiry) {
+    if (sock == -1) {
         return;
     }
 
@@ -1821,7 +1821,7 @@ void send_visca_packet_raw(uint8_t *buf, ssize_t bufsize, int timeout_usec, bool
         udpbuf[7] = g_visca_sequence_number & 0xff;
         g_visca_sequence_number++;
         bcopy(buf, udpbuf + 8, bufsize);
-        if (sendto(g_visca_sock, udpbuf, udpbufsize, 0,
+        if (sendto(sock, udpbuf, udpbufsize, 0,
                (sockaddr *)&g_visca_addr, sizeof(struct sockaddr_in)) != udpbufsize) {
             perror("write failed.");
         }
@@ -1831,7 +1831,7 @@ void send_visca_packet_raw(uint8_t *buf, ssize_t bufsize, int timeout_usec, bool
         }
         free(udpbuf);
     } else {
-        if (write(g_visca_sock, buf, bufsize) != bufsize) {
+        if (write(sock, buf, bufsize) != bufsize) {
             perror("write failed.");
         }
     }
@@ -1841,9 +1841,9 @@ void send_visca_packet_raw(uint8_t *buf, ssize_t bufsize, int timeout_usec, bool
         return;
     }
 
-    uint8_t ack = get_ack(g_visca_sock, timeout_usec);
+    uint8_t ack = get_ack(sock, timeout_usec);
     if (ack == 5) return;
-    else if (ack == 4) get_ack(g_visca_sock, timeout_usec);
+    else if (ack == 4) get_ack(sock, timeout_usec);
     if (ack != 5 && enable_verbose_debugging) {
         fprintf(stderr, "Unexpected ack: %d\n", ack);
     }
@@ -1856,32 +1856,34 @@ uint8_t *get_ack_data(int sock, int timeout_usec, ssize_t *len) {
 
     fd_set readfds;
     FD_ZERO(&readfds);
-    FD_SET(g_visca_sock, &readfds);
+    FD_SET(sock, &readfds);
     struct timeval tv;
     tv.tv_sec = 0;
     tv.tv_usec = timeout_usec;
     ssize_t received_length = 0;
     bool should_continue = true;
+    int retries = 3;  // Cap retries on Linux, because otherwise this causes
+                      // hangs.  I have no idea why.
     do {
-        int sock = select(g_visca_sock + 1, &readfds, NULL, NULL, &tv);
-        if (sock > 0) {
+        int first_sock = select(sock + 1, &readfds, NULL, NULL, &tv);
+        if (first_sock > 0) {
             if (enable_verbose_debugging) {
                 fprintf(stderr, "Calling recvfrom\n");
             }
-            received_length = recvfrom(g_visca_sock, buf, sizeof(buf),
+            received_length = recvfrom(sock, buf, sizeof(buf),
                0, NULL, NULL);
             if (enable_verbose_debugging) {
                 fprintf(stderr, "Done (len = %llu).\n", (unsigned long long)received_length);
             }
             break;
-        } else if (sock == -1 && errno != EINTR) {
+        } else if (first_sock == -1 && errno != EINTR) {
             fprintf(stderr, "Timed out waiting for ack from camera.\n");
             *len = 0;
             return NULL;
         } else {
             if (enable_verbose_debugging) { fprintf(stderr, "EINTR\n"); }
         }
-    } while (!exit_app);
+    } while (!exit_app && retries-- > 0);
 
     uint8_t *ack = (uint8_t *)malloc(received_length);
     bcopy(buf, ack, received_length);
