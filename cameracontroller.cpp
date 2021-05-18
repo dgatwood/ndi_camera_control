@@ -1603,7 +1603,7 @@ void updateTallyLightsOverVISCA(int sock) {
     // uint8_t buf[7] = { 0x81, 0x09, 0x00, 0x02, 0x00, 0x00, 0xFF };  // Firmware version command.
     ssize_t responseLength = 0;
     uint8_t *responseBuf = send_visca_inquiry(sock, buf, sizeof(buf), 20000, &responseLength);
-    if (responseBuf) {
+    if (responseBuf && responseLength == 4 && responseBuf[1] == 0x50 && responseBuf[3] == 0xff) {
         if (enable_verbose_debugging) {
             fprintf(stderr, "Got tally data: %s\n", fmtbuf(responseBuf, responseLength));
         }
