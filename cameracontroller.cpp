@@ -362,7 +362,44 @@ void drawOnScreenLights(unsigned char *framebuffer_base, int xres, int yres, int
     bool configureGPIO(void);
 #endif  // __linux__
 
+// Define to enable a hack that connects to a VISCA device at 127.0.0.1 for
+// testing custom VISCA receive code.
+#undef PTZ_TESTING
+
+#ifdef PTZ_TESTING
+int connectToVISCAPortWithAddress(const struct sockaddr *address);
+#endif
+
 int main(int argc, char *argv[]) {
+
+#ifdef PTZ_TESTING
+    g_visca_use_udp = true;
+    enable_verbose_debugging = false;
+
+    struct sockaddr_in address;
+    bzero(&address, sizeof(address));
+
+    address.sin_family = AF_INET;
+    address.sin_port = 0;  // Set in connect method.
+    inet_aton("127.0.0.1", &address.sin_addr);
+    g_visca_sock = connectToVISCAPortWithAddress((struct sockaddr *)&address);
+
+    fprintf(stderr, "SOCK: %d\n", g_visca_sock);
+
+    visca_running = true;
+    pthread_t newMotionThread;
+    pthread_create(&newMotionThread, NULL, runPTZThread, NULL);
+
+    while (1) {
+        fprintf(stderr, "Active: %s preview: %s malfunctioning: %s\n",
+                g_camera_active ? "YES" : " NO",
+                g_camera_preview ? "YES" : " NO",
+                g_camera_malfunctioning ? "YES" : " NO");
+        usleep(1000000);
+    }
+
+#endif
+
     runUnitTests();
 
 #ifdef __linux__
