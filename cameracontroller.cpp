@@ -152,6 +152,7 @@ typedef struct {
 
     // Debounce support.
     bool setButtonDown;         // True if set button is down.
+    bool currentValue[MAX_BUTTONS + 1];  // 0 .. MAX_BUTTONS
     bool previousValue[MAX_BUTTONS + 1];  // 0 .. MAX_BUTTONS
     int debounceCounter[MAX_BUTTONS + 1];  // 0 .. MAX_BUTTONS
 } motionData_t;
@@ -364,13 +365,15 @@ void drawOnScreenLights(unsigned char *framebuffer_base, int xres, int yres, int
 
 // Define to enable a hack that connects to a VISCA device at 127.0.0.1 for
 // testing custom VISCA receive code.
-#undef PTZ_TESTING
+#define PTZ_TESTING
 
 #ifdef PTZ_TESTING
 int connectToVISCAPortWithAddress(const struct sockaddr *address);
 #endif
 
 int main(int argc, char *argv[]) {
+
+    runUnitTests();
 
 #ifdef PTZ_TESTING
     g_visca_use_udp = true;
@@ -399,8 +402,6 @@ int main(int argc, char *argv[]) {
     }
 
 #endif
-
-    runUnitTests();
 
 #ifdef __linux__
     if (!configureGPIO()) {
@@ -2129,32 +2130,42 @@ bool readButton(int buttonNumber, motionData_t *motionData) {
     return debounce(buttonNumber, value, motionData, 3);
 }
 
+// Don't change values until the value has been consistently high or low
+// for `debounceCount` cycles.
 bool debounce(int buttonNumber, bool value, motionData_t *motionData, int debounceCount) {
     // Debounce the value.
     const bool localDebug = false;
-    bool buttonChanged = motionData->previousValue[buttonNumber] != value;
-    if (buttonChanged && motionData->debounceCounter[buttonNumber] == 0) {
-        // If the set button changed states and it did not change states recently,
-        // keep the new state, and update the last state so that we won't print
-        // the state change message repeatedly (for debugging).
-        motionData->debounceCounter[buttonNumber] = debounceCount;
-        if (localDebug) fprintf(stderr, "debounceCounter[%d] = %d\n", buttonNumber, debounceCount);
 
-        motionData->previousValue[buttonNumber] = value;
-        if (localDebug) fprintf(stderr, "previousValue[%d] = %s\n", buttonNumber, value ? "true" : "false");
-    } else if (buttonChanged) {
-        // If the set button changed states, but previously changed recently,
-        // ignore the state change for now.
-        value = motionData->previousValue[buttonNumber];
-        motionData->debounceCounter[buttonNumber]--;
-        if (localDebug) fprintf(stderr, "debounceCounter[%d] = %d\n", buttonNumber, motionData->debounceCounter[buttonNumber]);
-    } else if (motionData->debounceCounter[buttonNumber] > 0) {
-        // If the state didn't change, Just decrement the debounce counter.
-        motionData->debounceCounter[buttonNumber]--;
-        if (localDebug) fprintf(stderr, "debounceCounter[%d] = %d\n", buttonNumber, motionData->debounceCounter[buttonNumber]);
+    // Previous value comes from the last call to debounce (i.e. the last
+    // time the button was read).
+    bool buttonChanged = motionData->previousValue[buttonNumber] != value;
+
+    if (buttonChanged) {
+      motionData->previousValue[buttonNumber] = value;
+      motionData->debounceCounter[buttonNumber] = 1;
+      if (localDebug) {
+        fprintf(stderr, "Debounce[%d] = 1\n", buttonNumber);
+      }
+    } else if (motionData->debounceCounter[buttonNumber] < (debounceCount - 1)) {
+      motionData->debounceCounter[buttonNumber]++;
+      if (localDebug) {
+        fprintf(stderr, "Debounce[%d]++ -> %d\n", buttonNumber,
+               motionData->debounceCounter[buttonNumber]);
+      }
+    } else {
+      // Update the value to return.
+      motionData->currentValue[buttonNumber] = value;
+      if (localDebug) {
+        fprintf(stderr, "Current[%d] -> %s\n", buttonNumber,
+                value ? "true" : "false");
+      }
+    }
+    if (localDebug) {
+      fprintf(stderr, "Debounce return[%d] -> %s\n", buttonNumber,
+            motionData->currentValue[buttonNumber] ? "true" : "false");
     }
 
-    return value;
+    return motionData->currentValue[buttonNumber];
 }
 
 #ifdef __linux__
@@ -2642,23 +2653,36 @@ void testDebounce(void) {
     motionData_t motionData;
     memset(&motionData, 0, sizeof(motionData));
 
+    assert(!debounce(0, true, &motionData, 5));
+    assert(!debounce(0, true, &motionData, 5));
+    assert(!debounce(0, true, &motionData, 5));
+    assert(!debounce(0, true, &motionData, 5));
     assert(debounce(0, true, &motionData, 5));
     assert(debounce(0, false, &motionData, 5));
     assert(debounce(0, true, &motionData, 5));
-    assert(motionData.debounceCounter[0] == 3);
-    assert(debounce(0, false, &motionData, 5));
-    assert(debounce(0, false, &motionData, 5));
-    assert(debounce(0, false, &motionData, 5));
-    assert(!debounce(0, false, &motionData, 5));
+    assert(debounce(0, true, &motionData, 5));
+    assert(motionData.debounceCounter[0] == 2);
+    assert(debounce(0, false, &motionData, 3));
+    assert(debounce(0, false, &motionData, 3));
+    assert(!debounce(0, false, &motionData, 3));
+    assert(!debounce(0, true, &motionData, 3));
+    assert(!debounce(0, false, &motionData, 3));
+    assert(!debounce(0, false, &motionData, 3));
+    assert(motionData.debounceCounter[0] == 2);
     assert(!debounce(0, true, &motionData, 5));
-    assert(!debounce(0, false, &motionData, 5));
-    assert(motionData.debounceCounter[0] == 3);
     assert(!debounce(0, true, &motionData, 5));
     assert(!debounce(0, true, &motionData, 5));
     assert(!debounce(0, true, &motionData, 5));
+    assert(debounce(0, true, &motionData, 5));
+    assert(!debounce(1, true, &motionData, 5));
+    assert(!debounce(1, true, &motionData, 5));
+    assert(!debounce(1, true, &motionData, 5));
+    assert(!debounce(1, true, &motionData, 5));
     assert(debounce(1, true, &motionData, 5));
-    assert(!debounce(0, false, &motionData, 5));
+    assert(debounce(1, true, &motionData, 5));
+    assert(debounce(1, true, &motionData, 5));
+    assert(debounce(0, false, &motionData, 5));
     assert(debounce(0, true, &motionData, 5));
-    assert(motionData.debounceCounter[1] == 5);
+    assert(motionData.debounceCounter[1] == 4);
 
 }
