@@ -30,7 +30,6 @@
 static float kCenterMotionThreshold = 0.05;
 
 #define INCLUDE_VISCA
-#define USE_VISCA_FOR_PAN_AND_TILT
 #define USE_VISCA_FOR_EXPOSURE_COMPENSATION
 
 #ifdef __linux__
@@ -116,6 +115,7 @@ bool enable_verbose_debugging = false;
 /* Enable VISCA-over-IP camera control. */
 #ifdef INCLUDE_VISCA
 bool enable_visca = false;
+bool enable_visca_ptz = false;
 bool visca_running = false;
 #endif // INCLUDE_VISCA
 
@@ -365,7 +365,7 @@ void drawOnScreenLights(unsigned char *framebuffer_base, int xres, int yres, int
 
 // Define to enable a hack that connects to a VISCA device at 127.0.0.1 for
 // testing custom VISCA receive code.
-#define PTZ_TESTING
+#undef PTZ_TESTING
 
 #ifdef PTZ_TESTING
 int connectToVISCAPortWithAddress(const struct sockaddr *address);
@@ -463,6 +463,7 @@ int main(int argc, char *argv[]) {
         if (!strcmp(argv[i], "-V") || !strcmp(argv[i], "--enable_visca")) {
             fprintf(stderr, "Enabling VISCA-over-IP control.\n");
             enable_visca = true;
+            enable_visca_ptz = true;
         }
         if (!strcmp(argv[i], "-u") || !strcmp(argv[i], "--visca_use_udp")) {
             fprintf(stderr, "Enabling VISCA UDP.\n");
@@ -534,8 +535,10 @@ int main(int argc, char *argv[]) {
             }
         }
 #endif
+fprintf(stderr, "ARG: \"%s\"\n", argv[i]);
         if (!strcmp(argv[i], "-p") || !strcmp(argv[i], "--visca_port")) {
             if (argc > i + 1) {
+              enable_visca = true;
               g_visca_port = atoi(argv[i+1]);
               i++;
             }
@@ -1611,14 +1614,14 @@ void sendManualExposureOverVISCA(int sock);
 
 void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
     updateTallyLightsOverVISCA(g_visca_sock);
-    sendZoomUpdatesOverVISCA(g_visca_sock, motionData);
-#ifdef USE_VISCA_FOR_PAN_AND_TILT
-    sendPanTiltUpdatesOverVISCA(g_visca_sock, motionData);
-#endif
+    if (enable_visca_ptz) {
+        sendZoomUpdatesOverVISCA(g_visca_sock, motionData);
+        sendPanTiltUpdatesOverVISCA(g_visca_sock, motionData);
 #ifdef USE_VISCA_FOR_EXPOSURE_COMPENSATION
-    sendExposureCompensationOverVISCA(g_visca_sock);
-    sendManualExposureOverVISCA(g_visca_sock);
+        sendExposureCompensationOverVISCA(g_visca_sock);
+        sendManualExposureOverVISCA(g_visca_sock);
 #endif
+    }
 }
 
 static uint32_t g_visca_sequence_number = 0;
@@ -1982,9 +1985,7 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     }
 #endif
 
-#ifdef USE_VISCA_FOR_PAN_AND_TILT
-    if (!visca_running || g_visca_sock == -1) {
-#endif
+    if (!enable_visca_ptz || !visca_running || g_visca_sock == -1) {
         NDIlib_recv_ptz_pan_tilt_speed(pNDI_recv, copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
 
         if (enable_ptz_debugging) {
@@ -1992,9 +1993,7 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
                 fprintf(stderr, "xSpeed: %f, ySpeed; %f ", copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
             }
         }
-#ifdef USE_VISCA_FOR_PAN_AND_TILT
     }
-#endif
     if (copyOfMotionData.retrievePositionNumber > 0 &&
         copyOfMotionData.retrievePositionNumber != lastMotionData.retrievePositionNumber) {
         fprintf(stderr, "Retrieving position %d\n", copyOfMotionData.retrievePositionNumber);
