@@ -467,6 +467,7 @@ int main(int argc, char *argv[]) {
         }
         if (!strcmp(argv[i], "-u") || !strcmp(argv[i], "--visca_use_udp")) {
             fprintf(stderr, "Enabling VISCA UDP.\n");
+            enable_visca = true;
             g_visca_use_udp = true;
         }
 #ifdef USE_VISCA_FOR_EXPOSURE_COMPENSATION

@@ -156,12 +156,16 @@ General flags:
 
 VISCA command-line flags:
 
-  -V / --enable_visca           -- Enables VISCA for camera control.
-  -u / --visca_use_udp          -- Enables UDP mode for VISCA.  At this point, TCP support is
-                                   untested, so you should always pass this flag.
-  -p / --visca-port             -- Sets the VISCA port.  Most cameras use port 52381 UDP.
-                                   However, this code defaults to the PTZOptics port, 1259 UDP.
-                                   Note that PTZOptics cameras are entirely untested.
+  -V / --enable_visca           -- Enables VISCA for camera control.  To enable visca for tally
+                                   light purposes while using NDI camera control, set a port
+                                   with -p, but don't pass -V.
+  -u / --visca_use_udp          -- Enables UDP mode for VISCA and enables VISCA for tally light
+                                   reporting.  At this point, TCP support is untested, so you
+                                   should always pass this flag.
+  -p / --visca-port             -- Sets the VISCA port and enables VISCA for tally light reporting.
+                                   Most cameras use port 52381 UDP.  However, this code defaults to
+                                   the PTZOptics port, 1259 UDP.  Note that PTZOptics cameras are
+                                   entirely untested.
   -O / --onscreenlights         -- Configures the code to use on-screen boxes instead of physical
                                    status LEDs.  (Note that some status features are available
                                    only with VISCA.)
