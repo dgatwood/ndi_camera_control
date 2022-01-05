@@ -1979,7 +1979,7 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     }
 
 #ifdef INCLUDE_VISCA
-    if (!visca_running || g_visca_sock == -1) {
+    if (!enable_visca_ptz || !visca_running || g_visca_sock == -1) {
 #endif
         NDIlib_recv_ptz_zoom_speed(pNDI_recv, -copyOfMotionData.zoomPosition);
 #ifdef INCLUDE_VISCA
