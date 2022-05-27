@@ -52,7 +52,7 @@ static float kCenterMotionThreshold = 0.05;
     #endif // USE_AVAHI
 #endif // INCLUDE_VISCA
 
-// #define DEMO_MODE
+#undef DEMO_MODE
 
 // This must be set correctly in Linux, because the NDI library is bizarre.
 #define NDI_LIBRARY_PATH "/usr/local/NDISDK/lib/arm-rpi3-linux-gnueabihf/libndi.so.4"
@@ -376,7 +376,11 @@ int main(int argc, char *argv[]) {
     runUnitTests();
 
 #ifdef PTZ_TESTING
+    enable_visca = true;
+    enable_visca_ptz = true;
+    // enable_ptz_debugging = true;
     g_visca_use_udp = true;
+    g_visca_port = 52381;
     enable_verbose_debugging = false;
 
     struct sockaddr_in address;
@@ -2489,17 +2493,21 @@ void *runPTZThread(void *argIgnored) {
     while (true) {
 #ifdef DEMO_MODE
         demoPTZValues();
-#else
+#else  // !DEMO_MODE
+
 #ifdef __linux__
         if (io_expander != NULL) {
-#endif
+#endif  // !__linux__
+
             updatePTZValues();
+
 #ifdef __linux__
         }
-#endif
+#endif  // !__linux__
+
         // The I/O expander is slow enough that we don't
         usleep(5000);
-#endif
+#endif  // DEMO_MODE
     }
 }
 
@@ -2608,46 +2616,56 @@ char *fmtbuf(uint8_t *buf, ssize_t bufsize) {
 #pragma mark - Tests
 
 #ifdef DEMO_MODE
+void demoSendPTZ(void) {
+#ifdef PTZ_TESTING
+    motionData_t motionData = getMotionData();
+    sendPTZUpdatesOverVISCA(&motionData);
+#endif
+}
+
 void demoPTZValues(void) {
     motionData_t motionData;
     bzero(&motionData, sizeof(motionData));
 
     // Move the camera for one second at a time.
-    motionData.xAxisPosition = 1.0; setMotionData(motionData); usleep(1000000);
-    motionData.xAxisPosition = 0.0; setMotionData(motionData); usleep(1000000);
-    motionData.yAxisPosition = 1.0; setMotionData(motionData); usleep(1000000);
-    motionData.yAxisPosition = 0.0; setMotionData(motionData); usleep(1000000);
-    motionData.zoomPosition = 1.0; setMotionData(motionData); usleep(1000000);
-    motionData.zoomPosition = 0.0; setMotionData(motionData); usleep(1000000);
+    motionData.xAxisPosition = 1.0; setMotionData(motionData); demoSendPTZ(); usleep(1000000);
+    motionData.xAxisPosition = 0.0; setMotionData(motionData); demoSendPTZ(); usleep(1000000);
+    motionData.yAxisPosition = 1.0; setMotionData(motionData); demoSendPTZ(); usleep(1000000);
+    motionData.yAxisPosition = 0.0; setMotionData(motionData); demoSendPTZ(); usleep(1000000);
+    motionData.zoomPosition = 1.0; setMotionData(motionData); demoSendPTZ(); usleep(1000000); fprintf(stderr, "ZOOM 1.0");
+    motionData.zoomPosition = 0.0; setMotionData(motionData); demoSendPTZ(); usleep(1000000); fprintf(stderr, "ZOOM 0");
 
     // Store in position 1.
-    motionData.storePositionNumber = 1; setMotionData(motionData); usleep(1000000);
-    motionData.storePositionNumber = 0; setMotionData(motionData); usleep(1000000);
+    motionData.storePositionNumber = 1; setMotionData(motionData); demoSendPTZ(); usleep(1000000);
+    motionData.storePositionNumber = 0; setMotionData(motionData); demoSendPTZ(); usleep(1000000);
 
-    motionData.xAxisPosition = -1.0; setMotionData(motionData); usleep(1000000);
-    motionData.xAxisPosition = 0.0; setMotionData(motionData); usleep(1000000);
-    motionData.yAxisPosition = -1.0; setMotionData(motionData); usleep(1000000);
-    motionData.yAxisPosition = 0.0; setMotionData(motionData); usleep(1000000);
-    motionData.zoomPosition = -1.0; setMotionData(motionData); usleep(1000000);
-    motionData.zoomPosition = 0.0; setMotionData(motionData); usleep(1000000);
+    motionData.xAxisPosition = -1.0; setMotionData(motionData); demoSendPTZ(); usleep(1000000);
+    motionData.xAxisPosition = 0.0; setMotionData(motionData); demoSendPTZ(); usleep(1000000);
+    motionData.yAxisPosition = -1.0; setMotionData(motionData); demoSendPTZ(); usleep(1000000);
+    motionData.yAxisPosition = 0.0; setMotionData(motionData); demoSendPTZ(); usleep(1000000);
+    motionData.zoomPosition = -1.0; setMotionData(motionData); demoSendPTZ(); usleep(1000000); fprintf(stderr, "ZOOM -1.0");
+    motionData.zoomPosition = 0.0; setMotionData(motionData); demoSendPTZ(); usleep(1000000); fprintf(stderr, "ZOOM 0");
 
     // Store in position 2.
-    motionData.storePositionNumber = 2; setMotionData(motionData); usleep(1000000);
-    motionData.storePositionNumber = 0; setMotionData(motionData); usleep(1000000);
+    motionData.storePositionNumber = 2; setMotionData(motionData); demoSendPTZ(); usleep(1000000);
+    motionData.storePositionNumber = 0; setMotionData(motionData); demoSendPTZ(); usleep(1000000);
 
-    motionData.retrievePositionNumber = 1; setMotionData(motionData); usleep(1000000);
-    motionData.storePositionNumber = 0; setMotionData(motionData); usleep(1000000);
+    motionData.retrievePositionNumber = 1; setMotionData(motionData); demoSendPTZ(); usleep(1000000);
+    motionData.storePositionNumber = 0; setMotionData(motionData); demoSendPTZ(); usleep(1000000);
 
-    motionData.retrievePositionNumber = 2; setMotionData(motionData); usleep(1000000);
-    motionData.storePositionNumber = 0; setMotionData(motionData); usleep(1000000);
+    motionData.retrievePositionNumber = 2; setMotionData(motionData); demoSendPTZ(); usleep(1000000);
+    motionData.storePositionNumber = 0; setMotionData(motionData); demoSendPTZ(); usleep(1000000);
 }
 #endif
 
 void testDebounce(void);
 void runUnitTests(void) {
+#ifndef DEMO_MODE
     testDebounce();
+#endif  // DEMO_MODE
 }
 
+#ifndef DEMO_MODE
 // bool debounce(int buttonNumber, bool value, motionData_t *motionData, int debounceCount);
 void testDebounce(void) {
     motionData_t motionData;
@@ -2684,5 +2702,6 @@ void testDebounce(void) {
     assert(debounce(0, false, &motionData, 5));
     assert(debounce(0, true, &motionData, 5));
     assert(motionData.debounceCounter[1] == 4);
-
 }
+#endif  // DEMO_MODE
+
