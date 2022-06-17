@@ -29,7 +29,9 @@
 
 static float kCenterMotionThreshold = 0.05;
 
-#define INCLUDE_VISCA
+// Playing with P2 protocol.  Will delete later.
+#undef P2_HACK
+
 #define USE_VISCA_FOR_EXPOSURE_COMPENSATION
 
 #ifdef __linux__
@@ -37,20 +39,18 @@ static float kCenterMotionThreshold = 0.05;
 #include <pigpiod_if2.h>
 #endif // __linux__
 
-#ifdef INCLUDE_VISCA
-    #include <arpa/inet.h>
-    #include <netinet/in.h>
-    #include <sys/socket.h>
-    #ifdef USE_AVAHI
-        #include <avahi-client/client.h>
-        #include <avahi-client/lookup.h>
-        #include <avahi-common/simple-watch.h>
-        #include <avahi-common/malloc.h>
-        #include <avahi-common/error.h>
-    #else
-        #include <dns_sd.h>
-    #endif // USE_AVAHI
-#endif // INCLUDE_VISCA
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#ifdef USE_AVAHI
+    #include <avahi-client/client.h>
+    #include <avahi-client/lookup.h>
+    #include <avahi-common/simple-watch.h>
+    #include <avahi-common/malloc.h>
+    #include <avahi-common/error.h>
+#else
+    #include <dns_sd.h>
+#endif // USE_AVAHI
 
 #undef DEMO_MODE
 
@@ -113,11 +113,9 @@ bool enable_button_debugging = false;
 bool enable_verbose_debugging = false;
 
 /* Enable VISCA-over-IP camera control. */
-#ifdef INCLUDE_VISCA
 bool enable_visca = false;
 bool enable_visca_ptz = false;
 bool visca_running = false;
-#endif // INCLUDE_VISCA
 
 #pragma mark - Constants and types
 
@@ -298,12 +296,10 @@ bool g_camera_malfunctioning = false;
 // 1    | F16
 // 0    | F18
 
-#ifdef INCLUDE_VISCA
-    int g_visca_sock = -1;
-    int g_visca_port = 0;
-    struct sockaddr_in g_visca_addr;
-    bool g_visca_use_udp = false;
-#endif
+int g_visca_sock = -1;
+int g_visca_port = 0;
+struct sockaddr_in g_visca_addr;
+bool g_visca_use_udp = false;
 
 #if __linux__
     pthread_mutex_t g_motionMutex = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER_NP;
@@ -346,9 +342,7 @@ void *runNDIRunLoop(void *receiver_thread_data_ref);
 char *fmtbuf(uint8_t *buf, ssize_t size);
 void drawOnScreenLights(unsigned char *framebuffer_base, int xres, int yres, int bytes_per_pixel);
 
-#ifdef INCLUDE_VISCA
-    bool connectVISCA(char *stream_name);
-#endif
+bool connectVISCA(char *stream_name);
 
 #ifdef DEMO_MODE
     void demoPTZValues(void);
@@ -380,7 +374,11 @@ int main(int argc, char *argv[]) {
     enable_visca_ptz = true;
     // enable_ptz_debugging = true;
     g_visca_use_udp = true;
+#ifdef P2_HACK
+    g_visca_port = 49154;
+#else
     g_visca_port = 52381;
+#endif
     enable_verbose_debugging = false;
 
     struct sockaddr_in address;
@@ -463,7 +461,6 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Using low-res mode.\n");
             use_low_res_preview = true;
         }
-#ifdef INCLUDE_VISCA
         if (!strcmp(argv[i], "-V") || !strcmp(argv[i], "--enable_visca")) {
             fprintf(stderr, "Enabling VISCA-over-IP control.\n");
             enable_visca = true;
@@ -539,7 +536,7 @@ int main(int argc, char *argv[]) {
                 fprintf(stderr, "Set manual iris to %d.\n", g_manual_shutter);
             }
         }
-#endif
+#endif  // USE_VISCA_FOR_EXPOSURE_COMPENSATION
 fprintf(stderr, "ARG: \"%s\"\n", argv[i]);
         if (!strcmp(argv[i], "-p") || !strcmp(argv[i], "--visca_port")) {
             if (argc > i + 1) {
@@ -549,7 +546,6 @@ fprintf(stderr, "ARG: \"%s\"\n", argv[i]);
             }
             fprintf(stderr, "Using port %d for VISCA.\n", g_visca_port);
         }
-#endif
     }
 
 #ifdef __linux__
@@ -681,7 +677,6 @@ fprintf(stderr, "ARG: \"%s\"\n", argv[i]);
                         if (pthread_create(&receiver_item->receiver_thread, NULL, runNDIRunLoop, thread_data) == 0) {
                             g_active_receivers = receiver_item;
                             fprintf(stderr, "Connected.\n");
-#ifdef INCLUDE_VISCA
                             if (g_visca_sock != -1) {
                                 close(g_visca_sock);
                                 g_visca_sock = -1;
@@ -689,7 +684,6 @@ fprintf(stderr, "ARG: \"%s\"\n", argv[i]);
                             if (enable_visca) {
                                 visca_running = connectVISCA(stream_name);
                             }
-#endif
                         } else {
                             free_receiver_item(receiver_item);
                         }
@@ -810,11 +804,7 @@ void *runNDIRunLoop(void *receiver_thread_data_ref) {
                     fprintf(stderr, "Unknown frame type %d.\n", frameType);
                 }
         }
-        if (g_ptzEnabled
-#ifdef INCLUDE_VISCA
-            || enable_visca
-#endif
-           ) {
+        if (g_ptzEnabled || enable_visca) {
 #ifdef USE_AVAHI
             if (enable_visca) {
                 int avahi_error = -1;
@@ -1199,8 +1189,6 @@ void drawLightPixel(unsigned char *framebuffer_base, ssize_t offset, int color, 
 }
 
 #pragma mark - VISCA Service Discovery
-
-#ifdef INCLUDE_VISCA
 
 int connectToVISCAPortWithAddress(const struct sockaddr *address);
 
@@ -1618,6 +1606,9 @@ void sendExposureCompensationOverVISCA(int sock);
 void sendManualExposureOverVISCA(int sock);
 
 void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
+#ifdef P2_HACK
+    sendZoomUpdatesOverP2(g_visca_sock, motionData);
+#else
     updateTallyLightsOverVISCA(g_visca_sock);
     if (enable_visca_ptz) {
         sendZoomUpdatesOverVISCA(g_visca_sock, motionData);
@@ -1627,6 +1618,7 @@ void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
         sendManualExposureOverVISCA(g_visca_sock);
 #endif
     }
+#endif
 }
 
 static uint32_t g_visca_sequence_number = 0;
@@ -1668,6 +1660,43 @@ void updateTallyLightsOverVISCA(int sock) {
         }
     }
 }
+
+#ifdef P2_HACK
+void sendZoomUpdatesOverP2(int sock, motionData_t *motionData) {
+    if (sock == -1) {
+        return;
+    }
+
+    ssize_t udpbufsize = bufsize + 8;
+    uint8_t *udpbuf = (uint8_t *)malloc(udpbufsize);
+    udpbuf[0] = 0x01;
+    udpbuf[1] = isInquiry ? 0x10 : 0x00;
+    udpbuf[2] = 0x00;
+    udpbuf[3] = bufsize;
+    udpbuf[4] = g_visca_sequence_number >> 24;
+    udpbuf[5] = (g_visca_sequence_number >> 16) & 0xff;
+    udpbuf[6] = (g_visca_sequence_number >> 8) & 0xff;
+    udpbuf[7] = g_visca_sequence_number & 0xff;
+    g_visca_sequence_number++;
+    bcopy(buf, udpbuf + 8, bufsize);
+    if (sendto(sock, udpbuf, udpbufsize, 0,
+           (sockaddr *)&g_visca_addr, sizeof(struct sockaddr_in)) != udpbufsize) {
+        perror("write failed.");
+    }
+
+    if (enable_verbose_debugging) {
+        fprintf(stderr, "Sent %s\n", fmtbuf(udpbuf, bufsize + 8));
+    }
+    free(udpbuf);
+
+    uint8_t ack = get_ack(sock, timeout_usec);
+    if (ack == 5) return;
+    else if (ack == 4) get_ack(sock, timeout_usec);
+    if (ack != 5 && enable_verbose_debugging) {
+        fprintf(stderr, "Unexpected ack: %d\n", ack);
+    }
+}
+#endif
 
 void sendZoomUpdatesOverVISCA(int sock, motionData_t *motionData) {
     uint8_t buf[6] = { 0x81, 0x01, 0x04, 0x07, 0x00, 0xFF };
@@ -1931,7 +1960,7 @@ uint8_t *get_ack_data(int sock, int timeout_usec, ssize_t *len) {
         }
     } while (!exit_app && retries-- > 0);
 
-    if (received_length == 0) {
+    if (received_length <= 0) {
         *len = 0;
         return NULL;
     }
@@ -1966,8 +1995,6 @@ uint8_t get_ack(int sock, int timeout_usec) {
     return ack_type;
 }
 
-#endif
-
 #pragma mark - PTZ Core
 
 void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
@@ -1982,13 +2009,9 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
         fprintf(stderr, "zSpeed: %f ", copyOfMotionData.zoomPosition);
     }
 
-#ifdef INCLUDE_VISCA
     if (!enable_visca_ptz || !visca_running || g_visca_sock == -1) {
-#endif
         NDIlib_recv_ptz_zoom_speed(pNDI_recv, -copyOfMotionData.zoomPosition);
-#ifdef INCLUDE_VISCA
     }
-#endif
 
     if (!enable_visca_ptz || !visca_running || g_visca_sock == -1) {
         NDIlib_recv_ptz_pan_tilt_speed(pNDI_recv, copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
@@ -2250,11 +2273,9 @@ void updatePTZValues() {
     updateLights(&newMotionData);
 
     setMotionData(newMotionData);
-#ifdef INCLUDE_VISCA
     if (visca_running) {
         sendPTZUpdatesOverVISCA(&newMotionData);
     }
-#endif
 }
 
 void updateLights(motionData_t *motionData) {
