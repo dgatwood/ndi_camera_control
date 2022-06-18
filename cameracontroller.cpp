@@ -1244,7 +1244,7 @@ bool connectVISCA(char *stream_name) {
         sa.sin_port = 0;
         sa.sin_addr = g_visca_custom_ip;
         handleDNSResponse((sockaddr *)&sa);
-        return;
+        return true;
     }
 
     pthread_mutex_lock(&g_avahiMutex);
