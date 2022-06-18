@@ -296,6 +296,8 @@ bool g_camera_malfunctioning = false;
 // 1    | F16
 // 0    | F18
 
+struct in_addr g_visca_custom_ip;
+bool visca_use_custom_ip = false;
 int g_visca_sock = -1;
 int g_visca_port = 0;
 struct sockaddr_in g_visca_addr;
@@ -374,11 +376,13 @@ int main(int argc, char *argv[]) {
     enable_visca_ptz = true;
     // enable_ptz_debugging = true;
     g_visca_use_udp = true;
+
 #ifdef P2_HACK
     g_visca_port = 49154;
-#else
+#else  // !P2_HACK
     g_visca_port = 52381;
-#endif
+#endif  // P2_HACK
+
     enable_verbose_debugging = false;
 
     struct sockaddr_in address;
@@ -402,8 +406,7 @@ int main(int argc, char *argv[]) {
                 g_camera_malfunctioning ? "YES" : " NO");
         usleep(1000000);
     }
-
-#endif
+#endif  // PTZ_TESTING
 
 #ifdef __linux__
     if (!configureGPIO()) {
@@ -545,6 +548,20 @@ fprintf(stderr, "ARG: \"%s\"\n", argv[i]);
               i++;
             }
             fprintf(stderr, "Using port %d for VISCA.\n", g_visca_port);
+        }
+        if (!strcmp(argv[i], "-I") || !strcmp(argv[i], "--visca_ip")) {
+            if (argc > i + 1) {
+              enable_visca = true;
+              if (inet_aton(argv[i+1], &g_visca_custom_ip)) {
+                  visca_use_custom_ip = true;
+              }
+              i++;
+            }
+            if (visca_use_custom_ip) {
+                fprintf(stderr, "Using ip address %s for VISCA.\n", inet_ntoa(g_visca_custom_ip));
+            } else {
+                fprintf(stderr, "Could not parse custom VISCA IP address.\n");
+            }
         }
     }
 
@@ -1220,6 +1237,16 @@ void avahi_browse_callback(AvahiServiceBrowser *browser,
 void handleDNSResponse(const struct sockaddr *address);
 
 bool connectVISCA(char *stream_name) {
+    if (visca_use_custom_ip) {
+        struct sockaddr_in sa;
+        bzero(&sa, sizeof(sa));
+        sa.sin_family = AF_INET;
+        sa.sin_port = htons(port);
+        sa.sin_addr = g_visca_custom_ip;
+        handleDNSResponse((sockaddr *)&sa);
+        return;
+    }
+
     pthread_mutex_lock(&g_avahiMutex);
 
     AvahiSimplePoll *avahi_simple_poll = g_avahi_simple_poll;
