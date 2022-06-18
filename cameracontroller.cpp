@@ -1241,7 +1241,7 @@ bool connectVISCA(char *stream_name) {
         struct sockaddr_in sa;
         bzero(&sa, sizeof(sa));
         sa.sin_family = AF_INET;
-        sa.sin_port = htons(port);
+        sa.sin_port = 0;
         sa.sin_addr = g_visca_custom_ip;
         handleDNSResponse((sockaddr *)&sa);
         return;
