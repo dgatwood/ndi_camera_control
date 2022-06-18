@@ -116,6 +116,7 @@ bool enable_verbose_debugging = false;
 bool enable_visca = false;
 bool enable_visca_ptz = false;
 bool visca_running = false;
+bool use_visca_for_presets = false;
 
 #pragma mark - Constants and types
 
@@ -344,7 +345,9 @@ void *runNDIRunLoop(void *receiver_thread_data_ref);
 char *fmtbuf(uint8_t *buf, ssize_t size);
 void drawOnScreenLights(unsigned char *framebuffer_base, int xres, int yres, int bytes_per_pixel);
 
-bool connectVISCA(char *stream_name);
+bool connectVISCA(char *stream_name, const char *context);
+void sendVISCALoadPreset(uint8_t presetNumber, int sock);
+void sendVISCASavePreset(uint8_t presetNumber, int sock);
 
 #ifdef DEMO_MODE
     void demoPTZValues(void);
@@ -455,6 +458,10 @@ int main(int argc, char *argv[]) {
         if (!strcmp(argv[i], "-P") || !strcmp(argv[i], "--ptzdebug")) {
             fprintf(stderr, "Enabling PTZ debugging.\n");
             enable_ptz_debugging = true;
+        }
+        if (!strcmp(argv[i], "-R") || !strcmp(argv[i], "--use_visca_for_store_and_recall")) {
+            fprintf(stderr, "Enabling PTZ debugging.\n");
+            use_visca_for_presets = true;
         }
         if (!strcmp(argv[i], "-v") || !strcmp(argv[i], "--verbose")) {
             fprintf(stderr, "Enabling verbose debugging (slow).\n");
@@ -699,7 +706,7 @@ fprintf(stderr, "ARG: \"%s\"\n", argv[i]);
                                 g_visca_sock = -1;
                             }
                             if (enable_visca) {
-                                visca_running = connectVISCA(stream_name);
+                                visca_running = connectVISCA(stream_name, "1");
                             }
                         } else {
                             free_receiver_item(receiver_item);
@@ -823,7 +830,7 @@ void *runNDIRunLoop(void *receiver_thread_data_ref) {
         }
         if (g_ptzEnabled || enable_visca) {
 #ifdef USE_AVAHI
-            if (enable_visca) {
+            if (enable_visca && !visca_use_custom_ip) {
                 int avahi_error = -1;
                 pthread_mutex_lock(&g_avahiMutex);
                 if (g_avahi_simple_poll != NULL) {
@@ -836,7 +843,7 @@ void *runNDIRunLoop(void *receiver_thread_data_ref) {
                     g_avahi_client = NULL;
                     g_avahi_service_browser = NULL;
     
-                    visca_running = connectVISCA(stream_name);
+                    visca_running = connectVISCA(stream_name, "2");
                 }
             }
 #else
@@ -1236,7 +1243,8 @@ void avahi_browse_callback(AvahiServiceBrowser *browser,
                            void *userdata);
 void handleDNSResponse(const struct sockaddr *address);
 
-bool connectVISCA(char *stream_name) {
+bool connectVISCA(char *stream_name, const char *context) {
+    fprintf(stderr, "Called connectVISCA in context %s\n", context);
     if (visca_use_custom_ip) {
         struct sockaddr_in sa;
         bzero(&sa, sizeof(sa));
@@ -1441,7 +1449,7 @@ void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
                                  const char *replyDomain,
                                  void *context);
 
-bool connectVISCA(char *stream_name) {
+bool connectVISCA(char *stream_name, char *context) {
     if (g_browseRef != NULL) {
         DNSServiceRefDeallocate(g_browseRef);
         g_browseRef = NULL;
@@ -1480,7 +1488,7 @@ void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
         fprintf(stderr, "Service browser for VISCA failed (error %d)\n", errorCode);
         DNSServiceRefDeallocate(sdRef);
         g_browseRef = NULL;
-        connectVISCA((char *)context);
+        connectVISCA((char *)context, "3");
         return;
     }
     if (g_resolveRef != NULL) {
@@ -1501,7 +1509,7 @@ void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
             fprintf(stderr, "Could not start service resolver for VISCA (error %d)\n", errorCode);
             DNSServiceRefDeallocate(sdRef);
             g_browseRef = NULL;
-            connectVISCA((char *)context);
+            connectVISCA((char *)context, "4");
             return;
         }
     } else {
@@ -1527,7 +1535,7 @@ void handleDNSServiceResolveReply(DNSServiceRef sdRef,
         fprintf(stderr, "Service resolver for VISCA failed (error %d)\n", errorCode);
         DNSServiceRefDeallocate(sdRef);
         g_resolveRef = NULL;
-        connectVISCA((char *)context);
+        connectVISCA((char *)context, "5");
         return;
     }
     if (g_lookupRef != NULL) {
@@ -1540,7 +1548,7 @@ void handleDNSServiceResolveReply(DNSServiceRef sdRef,
         fprintf(stderr, "Could not start host resolver for VISCA (error %d)\n", errorCode);
         DNSServiceRefDeallocate(sdRef);
         g_resolveRef = NULL;
-        connectVISCA((char *)context);
+        connectVISCA((char *)context, "6");
         return;
     }
 
@@ -1602,6 +1610,8 @@ int connectToVISCAPortWithAddress(const struct sockaddr *address) {
         perror("Socket could not be created.");
         return -1;
     }
+    int reuseValue = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuseValue, sizeof(reuseValue));
 
     struct sockaddr_in sa_recv;
     bzero(&sa_recv, sizeof(sa_recv));
@@ -1686,6 +1696,16 @@ void updateTallyLightsOverVISCA(int sock) {
             fprintf(stderr, "Unknown tally mode %d\n", tallyMode);
         }
     }
+}
+
+void sendVISCALoadPreset(uint8_t presetNumber, int sock) {
+    uint8_t buf[7] = { 0x81, 0x01, 0x04, 0x3F, 0x02, presetNumber, 0xFF };
+    send_visca_packet(sock, buf, sizeof(buf), 100000);
+}
+
+void sendVISCASavePreset(uint8_t presetNumber, int sock) {
+    uint8_t buf[7] = { 0x81, 0x01, 0x04, 0x3F, 0x01, presetNumber, 0xFF };
+    send_visca_packet(sock, buf, sizeof(buf), 100000);
 }
 
 #ifdef P2_HACK
@@ -2052,11 +2072,19 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     if (copyOfMotionData.retrievePositionNumber > 0 &&
         copyOfMotionData.retrievePositionNumber != lastMotionData.retrievePositionNumber) {
         fprintf(stderr, "Retrieving position %d\n", copyOfMotionData.retrievePositionNumber);
-        NDIlib_recv_ptz_recall_preset(pNDI_recv, copyOfMotionData.retrievePositionNumber, 1.0);  // As fast as possible.
+        if (use_visca_for_presets) {
+            sendVISCALoadPreset((uint8_t)copyOfMotionData.retrievePositionNumber, g_visca_sock);
+        } else {
+            NDIlib_recv_ptz_recall_preset(pNDI_recv, copyOfMotionData.retrievePositionNumber, 1.0);  // As fast as possible.
+        }
     } else if (copyOfMotionData.storePositionNumber > 0 &&
                copyOfMotionData.storePositionNumber != lastMotionData.storePositionNumber) {
         fprintf(stderr, "Storing position %d\n", copyOfMotionData.storePositionNumber);
-        NDIlib_recv_ptz_store_preset(pNDI_recv, copyOfMotionData.storePositionNumber);
+        if (use_visca_for_presets) {
+            sendVISCASavePreset((uint8_t)copyOfMotionData.storePositionNumber, g_visca_sock);
+        } else {
+            NDIlib_recv_ptz_store_preset(pNDI_recv, copyOfMotionData.storePositionNumber);
+        }
     }
     lastMotionData = copyOfMotionData;
 }
