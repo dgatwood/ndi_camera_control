@@ -431,7 +431,7 @@ int main(int argc, char *argv[]) {
         }
 #ifdef __linux__
         if (!strcmp(argv[i], "-D") || !strcmp(argv[i], "--duty_cycle")) {
-            fprintf(stderr, "Enabling PTZ debugging.\n");
+            fprintf(stderr, "Setting LED brightness.\n");
             if (argc > i + 1) {
                 long requested_duty_cycle = atoi(argv[i+1]);
                 if (requested_duty_cycle >= 0 &&
@@ -452,7 +452,7 @@ int main(int argc, char *argv[]) {
         }
 #endif // __linux__
         if (!strcmp(argv[i], "-B") || !strcmp(argv[i], "--buttondebug")) {
-            fprintf(stderr, "Enabling PTZ debugging.\n");
+            fprintf(stderr, "Enabling button debugging.\n");
             enable_button_debugging = true;
         }
         if (!strcmp(argv[i], "-P") || !strcmp(argv[i], "--ptzdebug")) {
@@ -460,7 +460,7 @@ int main(int argc, char *argv[]) {
             enable_ptz_debugging = true;
         }
         if (!strcmp(argv[i], "-R") || !strcmp(argv[i], "--use_visca_for_store_and_recall")) {
-            fprintf(stderr, "Enabling PTZ debugging.\n");
+            fprintf(stderr, "Enabling VISCA store and recall.\n");
             use_visca_for_presets = true;
         }
         if (!strcmp(argv[i], "-v") || !strcmp(argv[i], "--verbose")) {
@@ -1926,6 +1926,7 @@ void send_visca_packet(int sock, uint8_t *buf, ssize_t bufsize, int timeout_usec
 }
 
 void send_visca_packet_raw(int sock, uint8_t *buf, ssize_t bufsize, int timeout_usec, bool isInquiry) {
+    // fprintf(stderr, "Sending VISCA packet on sock %d size %d\n", sock, (int)bufsize);
     if (sock == -1) {
         return;
     }
