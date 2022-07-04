@@ -1449,7 +1449,7 @@ void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
                                  const char *replyDomain,
                                  void *context);
 
-bool connectVISCA(char *stream_name, char *context) {
+bool connectVISCA(char *stream_name, const char *context) {
     if (g_browseRef != NULL) {
         DNSServiceRefDeallocate(g_browseRef);
         g_browseRef = NULL;
