@@ -124,11 +124,17 @@ Prerequisites:
 
 * Add NDI to ld.so configuration if it is not there already:
 
-  Create a file named /etc/ld.so.conf.d/ndi.conf and paste in the following:
+  Create a file named /etc/ld.so.conf.d/ndi.conf and paste in one of the following:
 
-    /usr/local/NDISDK/lib/arm-rpi3-linux-gnueabihf
+    /usr/local/NDISDK/lib/arm-rpi4-linux-gnueabihf
+    /usr/local/NDISDK/lib/aarch64-rpi4-linux-gnueabi
 
-  or wherever you installed the SDK.
+  depending on your CPU architecture, adjusting the path as needed based on where you
+  installed the SDK.  Then run
+
+    sudo ldconfig
+
+  to update the cache.
 
 
 -------------------

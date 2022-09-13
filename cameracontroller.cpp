@@ -37,7 +37,17 @@ static float kCenterMotionThreshold = 0.05;
 #ifdef __linux__
 #define USE_AVAHI
 #ifdef USE_MRAA
-#include <mraa/spi.h>
+#include <mraa.h>
+
+mraa_pwm_context pwm_contexts[41];    // 1..40 for pins.
+mraa_gpio_context gpio_contexts[41];  // 1..40 for pins.
+
+int set_PWM_dutycycle(__attribute__ ((unused)) int unused,
+		  unsigned gpioPin, unsigned dutyCycle);
+int gpio_write(int pi, unsigned gpio, unsigned level);
+int set_mode(int pi, unsigned gpio, unsigned mode);
+
+#define PI_OUTPUT 42
 #else
 #include <pigpiod_if2.h>
 #endif
@@ -553,7 +563,6 @@ int main(int argc, char *argv[]) {
             }
         }
 #endif  // USE_VISCA_FOR_EXPOSURE_COMPENSATION
-fprintf(stderr, "ARG: \"%s\"\n", argv[i]);
         if (!strcmp(argv[i], "-p") || !strcmp(argv[i], "--visca_port")) {
             if (argc > i + 1) {
               enable_visca = true;
@@ -616,17 +625,8 @@ fprintf(stderr, "ARG: \"%s\"\n", argv[i]);
 #endif  // __linux__
         }
 
-        // Try to load the NDI SDK shared library (boilerplate NDI SDK code).
-        void *hNDILib = ::dlopen(ndi_path.c_str(), RTLD_LOCAL | RTLD_LAZY);
-
-        // Dynamically look up the shared library's initialization function (boilerplate NDI SDK code).
-        const NDIlib_v3* (*NDIlib_v3_load)(void) = NULL;
-        if (hNDILib) {
-            *((void**)&NDIlib_v3_load) = ::dlsym(hNDILib, "NDIlib_v3_load");
-        }
-
-        if (!NDIlib_v3_load) {
-            printf("Please re-install the NewTek NDI Runtimes to use this application.");
+        if (!NDIlib_initialize()) {
+            printf("The NDI library could not be initialized.");
             exit(0);
         }
 
@@ -2459,11 +2459,17 @@ void updateLights(motionData_t *motionData) {
 
 bool configureGPIO(void) {
 #ifdef __linux__
+#ifdef USE_MRAA
+    mraa_init();
+    bzero(pwm_contexts, sizeof(pwm_contexts));
+    bzero(gpio_contexts, sizeof(gpio_contexts));
+#else
     g_pig = pigpio_start(NULL, NULL);
     if (g_pig < 0) {
         fprintf(stderr, "Could not connect to pigpiod daemon.  (Try sudo systemctl enable pigpiod)\n");
         return false;
     }
+#endif
 
     if (set_mode(g_pig, LED_PIN_WHITE, PI_OUTPUT))
         return false;
@@ -2788,3 +2794,31 @@ void testDebounce(void) {
 }
 #endif  // DEMO_MODE
 
+#ifdef USE_MRAA
+
+// This leaks, so don't do it too much.
+int set_PWM_dutycycle(__attribute__ ((unused)) int unused,
+		  unsigned gpioPin, unsigned dutyCycle) {
+  if (pwm_contexts[gpioPin] == NULL) {
+    pwm_contexts[gpioPin] = mraa_pwm_init(gpioPin);
+  }
+  return mraa_pwm_write(pwm_contexts[gpioPin], dutyCycle / 255.0) == MRAA_SUCCESS;
+}
+
+int gpio_write(int pi, unsigned gpioPin, unsigned level) {
+  if (gpio_contexts[gpioPin] == NULL) {
+    gpio_contexts[gpioPin] = mraa_gpio_init(gpioPin);
+  }
+  return mraa_gpio_write(gpio_contexts[gpioPin], level ? 1 : 0) == MRAA_SUCCESS;
+}
+
+int set_mode(int pi, unsigned gpioPin, unsigned mode) {
+  if (gpio_contexts[gpioPin] == NULL) {
+    gpio_contexts[gpioPin] = mraa_gpio_init(gpioPin);
+  }
+  assert(mode == PI_OUTPUT);
+
+  return mraa_gpio_dir(gpio_contexts[gpioPin], MRAA_GPIO_OUT) == MRAA_SUCCESS;
+}
+
+#endif
