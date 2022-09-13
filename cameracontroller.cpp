@@ -36,7 +36,11 @@ static float kCenterMotionThreshold = 0.05;
 
 #ifdef __linux__
 #define USE_AVAHI
+#ifdef USE_MRAA
+#include <mraa/spi.h>
+#else
 #include <pigpiod_if2.h>
+#endif
 #endif // __linux__
 
 #include <arpa/inet.h>
@@ -120,6 +124,8 @@ bool use_visca_for_presets = false;
 
 #pragma mark - Constants and types
 
+#define safe_asprintf(a, b...) { int retval = asprintf(a, b); \
+	                         assert(retval != -1); }
 
 #ifdef __linux__
     #ifndef PAGE_SHIFT
@@ -354,7 +360,7 @@ void sendVISCASavePreset(uint8_t presetNumber, int sock);
 #endif
 
 #ifdef __linux__
-    bool cc_gpio_write(int pi, unsigned gpio, unsigned level);
+    bool cc_gpio_write(unsigned gpio, unsigned level);
 
     int pinNumberForAxis(int axis);
     int pinNumberForButton(int button);
@@ -438,7 +444,7 @@ int main(int argc, char *argv[]) {
                     requested_duty_cycle <= 255) {
                     base_duty_cycle = (uint8_t)requested_duty_cycle;
                 } else {
-                    fprintf(stderr, "Invalid duty cycle %d.  (Valid range: 0 to 255)\n", requested_duty_cycle);
+                    fprintf(stderr, "Invalid duty cycle %ld.  (Valid range: 0 to 255)\n", requested_duty_cycle);
                 }
                 i++;
             }
@@ -690,12 +696,12 @@ fprintf(stderr, "ARG: \"%s\"\n", argv[i]);
                     if (pNDI_recv) {
                         receiver_array_item_t receiver_item = new_receiver_array_item();
                         receiver_item->receiver = pNDI_recv;
-                        asprintf(&receiver_item->name, "%s", found_source_name);
+                        safe_asprintf(&receiver_item->name, "%s", found_source_name);
                         receiver_item->next = g_active_receivers;
                         receiver_thread_data_t thread_data = (receiver_thread_data_t)malloc(sizeof(*thread_data));
                         thread_data->p_NDILib = p_NDILib;
                         thread_data->pNDI_recv = receiver_item->receiver;
-                        asprintf(&thread_data->stream_name, "%s", stream_name);
+                        safe_asprintf(&thread_data->stream_name, "%s", stream_name);
                         thread_data->running = true;
                         receiver_item->thread_data = thread_data;
                         if (pthread_create(&receiver_item->receiver_thread, NULL, runNDIRunLoop, thread_data) == 0) {
@@ -2143,7 +2149,7 @@ float readAxisPosition(int axis) {
         return value;
     #else  // ! __linux__
         char *filename;
-        asprintf(&filename, "/var/tmp/axis.%d", axis);
+        safe_asprintf(&filename, "/var/tmp/axis.%d", axis);
         FILE *fp = fopen(filename, "r");
         free(filename);
         float value = 0.0;
@@ -2193,7 +2199,7 @@ bool readButton(int buttonNumber, motionData_t *motionData) {
     #else  // ! __linux__
         bool value = false;
         char *filename;
-        asprintf(&filename, "/var/tmp/button.%d", buttonNumber);
+        safe_asprintf(&filename, "/var/tmp/button.%d", buttonNumber);
         FILE *fp = fopen(filename, "r");
         free(filename);
         if (fp) {
@@ -2393,12 +2399,12 @@ void updateLights(motionData_t *motionData) {
 
 #if __linux__
     if (!g_use_on_screen_lights) {
-        cc_gpio_write(g_pig, LED_PIN_WHITE,  (bool)(litButtons & 0b1));      // 0 (white)
-        cc_gpio_write(g_pig, LED_PIN_RED,  (bool)(litButtons & 0b10));       // 1 (red)
-        cc_gpio_write(g_pig, LED_PIN_YELLOW, (bool)(litButtons & 0b100));    // 2 (yellow)
-        cc_gpio_write(g_pig, LED_PIN_GREEN, (bool)(litButtons & 0b1000));    // 3 (green)
-        cc_gpio_write(g_pig, LED_PIN_BLUE, (bool)(litButtons & 0b10000));    // 4 (blue)
-        cc_gpio_write(g_pig, LED_PIN_PURPLE, (bool)(litButtons & 0b100000)); // 5 (black)
+        cc_gpio_write(LED_PIN_WHITE,  (bool)(litButtons & 0b1));      // 0 (white)
+        cc_gpio_write(LED_PIN_RED,  (bool)(litButtons & 0b10));       // 1 (red)
+        cc_gpio_write(LED_PIN_YELLOW, (bool)(litButtons & 0b100));    // 2 (yellow)
+        cc_gpio_write(LED_PIN_GREEN, (bool)(litButtons & 0b1000));    // 3 (green)
+        cc_gpio_write(LED_PIN_BLUE, (bool)(litButtons & 0b10000));    // 4 (blue)
+        cc_gpio_write(LED_PIN_PURPLE, (bool)(litButtons & 0b100000)); // 5 (black)
     } else {
 #endif // __linux__
         motionData->light[0] = (bool)(litButtons & 0b1);      // 0 (white)
@@ -2423,13 +2429,13 @@ void updateLights(motionData_t *motionData) {
 #if __linux__
     if (!g_use_on_screen_lights) {
         // Program/RGB red
-        cc_gpio_write(g_pig, LED_PIN_RGB_RED, g_camera_active && !g_camera_malfunctioning);
+        cc_gpio_write(LED_PIN_RGB_RED, g_camera_active && !g_camera_malfunctioning);
 
         // Preview/RGB green
-        cc_gpio_write(g_pig, LED_PIN_RGB_GREEN, g_camera_preview && !g_camera_malfunctioning);
+        cc_gpio_write(LED_PIN_RGB_GREEN, g_camera_preview && !g_camera_malfunctioning);
 
         // Malfunction/RGB blue
-        cc_gpio_write(g_pig, LED_PIN_RGB_BLUE, g_camera_malfunctioning);
+        cc_gpio_write(LED_PIN_RGB_BLUE, g_camera_malfunctioning);
     }
 #endif // __linux__
 
@@ -2524,11 +2530,11 @@ uint8_t dutyCycle(int pin) {
 
 // A variant of gpio_write that automatically sets a
 // duty cycle on the pin instead of just turning it on.
-bool cc_gpio_write(int pi, unsigned gpio, unsigned level) {
+bool cc_gpio_write(unsigned gpio, unsigned level) {
     if (level) {
         return set_PWM_dutycycle(g_pig, gpio, dutyCycle(gpio));
     } else {
-        return gpio_write(pi, gpio, level);
+        return gpio_write(g_pig, gpio, level);
     }
 }
 #endif // __linux__
@@ -2612,8 +2618,8 @@ bool source_name_compare(const char *name1, const char *name2, bool use_fallback
     }
 
     char *truncname1 = NULL, *truncname2 = NULL;
-    asprintf(&truncname1, "%s", name1);
-    asprintf(&truncname2, "%s", name2);
+    safe_asprintf(&truncname1, "%s", name1);
+    safe_asprintf(&truncname2, "%s", name2);
     truncate_name_before_ip(truncname1);
     truncate_name_before_ip(truncname2);
 
@@ -2647,7 +2653,7 @@ uint32_t find_named_source(const NDIlib_source_t *p_sources,
             if (!is_shown) {
                 fprintf(stderr, "    \"%s\"\n", found_source_name);
                 receiver_array_item_t receiver_item = new_receiver_array_item();
-                asprintf(&receiver_item->name, "%s", found_source_name);
+                safe_asprintf(&receiver_item->name, "%s", found_source_name);
                 receiver_item->next = g_shown_sources;
                 g_shown_sources = receiver_item;
             }

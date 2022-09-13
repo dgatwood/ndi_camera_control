@@ -103,7 +103,14 @@ Prerequisites:
 * Disable X11 in raspi-config.
 * Install the NDI SDK from NewTek (available separately).
 * Install Avahi (client and common libraries).
-* Install pigpiod and enable the daemon.
+
+* For Raspberry Pi:
+  - Install pigpiod and enable the daemon.
+* For Rock Pi
+  - Install libmraa.
+
+    sudo apt-get install libmraa-rockpi4
+
 * Build the custom hardware.
 * Configure dhcpcd on your device to use a static IP fallback in the same IP range as your cameras
   (typically 192.168.100.x).  For example:
