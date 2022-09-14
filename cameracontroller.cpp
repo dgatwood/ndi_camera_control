@@ -39,13 +39,18 @@ static float kCenterMotionThreshold = 0.05;
 #ifdef USE_MRAA
 #include <mraa.h>
 
-mraa_pwm_context pwm_contexts[41];    // 1..40 for pins.
-mraa_gpio_context gpio_contexts[41];  // 1..40 for pins.
+#define MAX_PINS 40
+
+volatile bool soft_pwm_enabled[MAX_PINS + 1];   // 1..40 for pins.
+volatile uint8_t soft_pwm_value[MAX_PINS + 1];  // 1..40 for pins.
+mraa_gpio_context gpio_contexts[MAX_PINS + 1];  // 1..40 for pins.
 
 int set_PWM_dutycycle(__attribute__ ((unused)) int unused,
 		  unsigned gpioPin, unsigned dutyCycle);
 int gpio_write(int pi, unsigned gpio, unsigned level);
 int set_mode(int pi, unsigned gpio, unsigned mode);
+
+void *runPWMThread(void *argIgnored);
 
 #define PI_OUTPUT 42
 #else
@@ -343,6 +348,7 @@ static void sigint_handler(int)
 }
 
 void runUnitTests(void);
+void runLightTests(void);
 bool configureScreen(NDIlib_video_frame_v2_t *video_recv);
 bool drawFrame(NDIlib_video_frame_v2_t *video_recv);
 void *runPTZThread(void *argIgnored);
@@ -387,8 +393,17 @@ int connectToVISCAPortWithAddress(const struct sockaddr *address);
 #endif
 
 int main(int argc, char *argv[]) {
-
     runUnitTests();
+
+#ifdef USE_MRAA
+    pthread_t newSoftPWMThread;
+    if (pthread_create(&newSoftPWMThread, NULL, runPWMThread, NULL)) {
+        fprintf(stderr, "Could not create PWM thread!\n");
+        perror("cameracontroller");
+    }
+#endif
+
+    runLightTests();
 
 #ifdef PTZ_TESTING
     enable_visca = true;
@@ -2460,8 +2475,11 @@ void updateLights(motionData_t *motionData) {
 bool configureGPIO(void) {
 #ifdef __linux__
 #ifdef USE_MRAA
-    mraa_init();
-    bzero(pwm_contexts, sizeof(pwm_contexts));
+    if (mraa_init() != MRAA_SUCCESS) {
+        return false;
+    }
+    bzero((void *)soft_pwm_enabled, sizeof(soft_pwm_enabled));
+    bzero((void *)soft_pwm_value, sizeof(soft_pwm_value));
     bzero(gpio_contexts, sizeof(gpio_contexts));
 #else
     g_pig = pigpio_start(NULL, NULL);
@@ -2754,6 +2772,32 @@ void runUnitTests(void) {
 #endif  // DEMO_MODE
 }
 
+void testPin(int pin);
+void runLightTests(void) {
+  fprintf(stderr, "Testing lights.\n");
+
+  testPin(LED_PIN_WHITE);
+  testPin(LED_PIN_RED);
+  testPin(LED_PIN_YELLOW);
+  testPin(LED_PIN_GREEN);
+  testPin(LED_PIN_BLUE);
+  testPin(LED_PIN_PURPLE);
+  testPin(LED_PIN_RGB_RED);
+  testPin(LED_PIN_RGB_GREEN);
+  testPin(LED_PIN_RGB_BLUE);
+
+}
+
+void testPin(int pin) {
+  for (int i = 0 ; i < 250; i += 50) {
+    set_PWM_dutycycle(0, pin, i);
+    usleep(1000000);
+  }
+  set_PWM_dutycycle(0, pin, 255);
+  usleep(1000000);
+  set_PWM_dutycycle(0, pin, 0);
+}
+
 #ifndef DEMO_MODE
 // bool debounce(int buttonNumber, bool value, motionData_t *motionData, int debounceCount);
 void testDebounce(void) {
@@ -2799,10 +2843,9 @@ void testDebounce(void) {
 // This leaks, so don't do it too much.
 int set_PWM_dutycycle(__attribute__ ((unused)) int unused,
 		  unsigned gpioPin, unsigned dutyCycle) {
-  if (pwm_contexts[gpioPin] == NULL) {
-    pwm_contexts[gpioPin] = mraa_pwm_init(gpioPin);
-  }
-  return mraa_pwm_write(pwm_contexts[gpioPin], dutyCycle / 255.0) == MRAA_SUCCESS;
+  soft_pwm_value[gpioPin] = dutyCycle;
+  soft_pwm_enabled[gpioPin] = true;
+  return true;
 }
 
 int gpio_write(int pi, unsigned gpioPin, unsigned level) {
@@ -2812,13 +2855,43 @@ int gpio_write(int pi, unsigned gpioPin, unsigned level) {
   return mraa_gpio_write(gpio_contexts[gpioPin], level ? 1 : 0) == MRAA_SUCCESS;
 }
 
+// The set_mode call we are emulating returns 0 on success, so we must do so as well.
 int set_mode(int pi, unsigned gpioPin, unsigned mode) {
+  fprintf(stderr, "Initializing pin %d\n", gpioPin);
   if (gpio_contexts[gpioPin] == NULL) {
     gpio_contexts[gpioPin] = mraa_gpio_init(gpioPin);
   }
+  if (gpio_contexts[gpioPin] == NULL) {
+    fprintf(stderr, "Could not initialize pin %d: unable to create context.\n", gpioPin);
+  }
   assert(mode == PI_OUTPUT);
 
-  return mraa_gpio_dir(gpio_contexts[gpioPin], MRAA_GPIO_OUT) == MRAA_SUCCESS;
+  bool retval = (mraa_gpio_dir(gpio_contexts[gpioPin], MRAA_GPIO_OUT) != MRAA_SUCCESS);
+  if (retval) {
+    fprintf(stderr, "Could not initialize pin %d: Unable to set direction.\n", gpioPin);
+  }
+  return retval;
+}
+
+void *runPWMThread(void *argIgnored) {
+// soft_pwm_enabled
+// soft_pwm_value
+
+  int pos = 0;
+  while (true) {
+    usleep(20);
+    for (int pin = 1; pin <= MAX_PINS; pin++) {
+      if (soft_pwm_enabled[pin]) {
+        if (pos == 0) {
+          gpio_write(0, pin, (soft_pwm_value[pin] > 0) ? 1 : 0);
+        } else if (soft_pwm_value[pin] == pos) {
+          gpio_write(0, pin, 0);
+        }
+      }
+    }
+    pos = (pos + 1) % 255;
+  }
+  return NULL;
 }
 
 #endif
