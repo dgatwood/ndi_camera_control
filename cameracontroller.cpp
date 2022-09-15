@@ -403,7 +403,7 @@ int main(int argc, char *argv[]) {
     }
 #endif
 
-    runLightTests();
+    // runLightTests();
 
 #ifdef PTZ_TESTING
     enable_visca = true;
