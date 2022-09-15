@@ -78,6 +78,12 @@ void *runPWMThread(void *argIgnored);
 
 #include "LightConfiguration.h"
 
+#ifdef USE_ROCKPI_PINOUTS
+#define PIMORONI_I2C_FILENAME "/dev/i2c-7"
+#else
+#define PIMORONI_I2C_FILENAME "/dev/i2c-1"
+#endif
+
 #ifdef __linux__
     #include <linux/kd.h>
     #include <linux/vt.h>
@@ -604,7 +610,7 @@ int main(int argc, char *argv[]) {
 
 #ifdef __linux__
 #ifndef DEMO_MODE
-    io_expander = newIOExpander(I2C_ADDRESS, 0, -1, 0, false);
+    io_expander = newIOExpander(PIMORONI_I2C_FILENAME, I2C_ADDRESS, 0, -1, 0, false);
     if (io_expander) {
         for (int pin = kPTZAxisX; pin <= kPTZAxisZoom; pin++) {
             ioe_set_mode(io_expander, pinNumberForAxis(pin), PIN_MODE_ADC, false, false);
