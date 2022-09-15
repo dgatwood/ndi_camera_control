@@ -234,3 +234,18 @@ https://docs.google.com/document/d/1Ss_mx8vgRw_ys8ocJK7LZhjXRocf9EI3qovyQXoxxJw/
 or in the hardware directory.
 
 Enjoy!
+
+---------
+Rock Pi
+---------
+
+Add the following to your /etc/rc.local:
+
+    # Change ownership of various stuff so that you can touch GPIO as a non-root user.
+    chown -R root:gpiouser /sys/class/gpio
+    chmod -R ug+rw /sys/class/gpio
+
+    # Disable the flashing blue heartbeat LED that sinks so much power that your LEDs will
+    # severely flash twice a second if you don't.
+    echo none > /sys/class/leds/status/trigger
+
