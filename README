@@ -249,3 +249,17 @@ Add the following to your /etc/rc.local:
     # severely flash twice a second if you don't.
     echo none > /sys/class/leds/status/trigger
 
+    # Downgrade to the 5.10.x kernel.  The 5.15.x kernel does not support GPIO correctly
+    # (10 pins are nonfunctional).
+    sudo armbian-config
+      System
+      Other
+      Press space to select "Yes, I understand".
+      Choose latest 5.10 kernel.
+      Choose "Reboot".
+
+    # Enable i2c
+    Edit the file /etc/armbianEnv.txt as root
+    Add:
+
+        overlays=i2c7
