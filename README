@@ -1,7 +1,8 @@
-NDI/VISCA PTZ Controller for Raspberry Pi
+NDI/VISCA PTZ Controller for Raspberry Pi and Rock Pi
 
-This code is a complete, but basic console-based pan-tilt-zoom controller for the Raspberry Pi 4.
-(In other words, this does not run in X11; it literally writes directly to the framebuffer.)
+This code is a complete, but basic console-based pan-tilt-zoom controller for the Raspberry Pi 4
+and Rock Pi 4.  (In other words, this does not run in X11; it literally writes directly to the
+framebuffer.)
 
 ---------
 Features:
@@ -14,16 +15,18 @@ Features:
   and for the set button (toggle) state.
 * Supports remote tally light polling to show whether the camera is in preview mode, program mode,
   inactive, or unresponsive (e.g. a network failure).  (Requires a VISCA-compatible camera.)
-* Supports zooming at variable speed.  (Requires a VISCA-compatible camera.)
+* Supports zooming at variable speed.
+* Supports both VISCA control and NDI control for maximum flexibility.
 
 
 -------------------
 A Note About VISCA:
 -------------------
 
-VISCA is a protocol for controlling PTZ cameras over IP.  Every NDI camera that I have tested so far
+VISCA is a protocol for controlling PTZ cameras over IP.  Almost every NDI camera that I have tested so far
 supports VISCA, though some devices may require you to use a different port.  This code has been tested
-against cameras by AVKANS, NewTek, and Marshall.  Your mileage may vary.
+against cameras by AVKANS, NewTek, and Marshall.  Your mileage may vary.  Panasonic uses its own protocol,
+so those are not supported unless they also supports NDI control.
 
 The reason VISCA is required for full functionality is that the NDI protocol doesn't provide some
 required features.  I've filed bugs with the NDI SDK team about some of these issues, and will continue
@@ -54,6 +57,13 @@ This PTZ controller software looks up the camera using Avahi, then connects to t
 that same device.  This may or may not be the best approach, but it works (with the caveat that you
 have to provide the VISCA port).
 
+This software can also be used with my VISCAPTZ software running on a second device, which provides
+pan and tilt support and position recall on custom motor-based hardware, along with zoom control
+for Panasonic cameras and tally light sourcing from Panasonic cameras (if connected by NDI to a
+source that sets the tally light properly) or directly from OBS or Tricaster mixing systems.
+(See https://github.com/dgatwood/VISCAPTZ for info.)
+
+
 --------------
 Prerequisites:
 --------------
@@ -65,55 +75,60 @@ Prerequisites:
   and symlink the files constants.h and ioexpander.c into the
   source folder.
 
-* Configure the console to use 32 bpp.  In config.txt, add/change:
+* Configure the console to use 32 bpp if necessary (Raspberry Pi).  In config.txt, add/change:
 
-  disable_overscan=0
-  framebuffer_depth=32
-  display_rotate=2
-  dtparam=i2c_arm=on
-  dtparam=spi=on
+        disable_overscan=0
+        framebuffer_depth=32
+        display_rotate=2
+        dtparam=i2c_arm=on
+        dtparam=spi=on
 
-* For HDMI panels, add/change:
+* For HDMI panels (Raspberry Pi), add/change:
 
-  max_usb_current=1
-  hdmi_force_hotplug=1
-  hdmi_group=1
-  hdmi_mode=16
-  hdmi_drive=2
+        max_usb_current=1
+        hdmi_force_hotplug=1
+        hdmi_group=1
+        hdmi_mode=16
+        hdmi_drive=2
 
-* For DSI panels, add/change:
+* For DSI panels (Raspberry Pi), add/change:
 
-  video=DSI-1:1920x1080@60
-  framebuffer_width=1920
-  framebuffer_height=1080
+        video=DSI-1:1920x1080@60
+        framebuffer_width=1920
+        framebuffer_height=1080
 
-* Disable the videocore 3D driver by commenting out the following line:
+* Disable the videocore 3D driver (Raspberry Pi) by commenting out the following line:
 
-  # dtoverlay=vc4-fkms-v3d
+        # dtoverlay=vc4-fkms-v3d
 
 * Disable the blinking cursor on the virtual console that you plan to use.
 
-  In cmdline.txt, change the console to:
+  - For Raspberry Pi:
 
-    console=tty3
+    In cmdline.txt, change the console to:
 
-  And add:
-    vt.global_cursor_default=0
+      console=tty3
 
-* Disable X11 in raspi-config.
+    And add:
+      vt.global_cursor_default=0
+
+  - For Rock Pi:
+
+    TBD
+
+* Disable X11 in raspi-config (Raspberry Pi) or equivalent.
 * Install the NDI SDK from NewTek (available separately).
 * Install Avahi (client and common libraries).
 
 * For Raspberry Pi:
   - Install pigpiod and enable the daemon.
 * For Rock Pi
-  - Install libmraa.
-
-    sudo apt-get install libmraa-rockpi4
+  - Install libmraa with apt (sudo apt-get install libmraa-rockpi4) or
+    build and install it from source code (https://github.com/eclipse/mraa).
 
 * Build the custom hardware.
 * Configure dhcpcd on your device to use a static IP fallback in the same IP range as your cameras
-  (typically 192.168.100.x).  For example:
+  (typically 192.168.100.x).  For example, on Raspberry Pi:
 
   profile static_eth0
   static ip_address=192.168.100.23/24
@@ -235,31 +250,34 @@ or in the hardware directory.
 
 Enjoy!
 
----------
-Rock Pi
----------
+----------------
+Rock Pi Addendum
+----------------
 
-Add the following to your /etc/rc.local:
+On Rock Pi, you must also perform the following changes:
 
-    # Change ownership of various stuff so that you can touch GPIO as a non-root user.
-    chown -R root:gpiouser /sys/class/gpio
-    chmod -R ug+rw /sys/class/gpio
+* Add the following to your /etc/rc.local:
 
-    # Disable the flashing blue heartbeat LED that sinks so much power that your LEDs will
-    # severely flash twice a second if you don't.
-    echo none > /sys/class/leds/status/trigger
+        # Change ownership of various stuff so that you can touch GPIO as a non-root user.
+        chown -R root:gpiouser /sys/class/gpio
+        chmod -R ug+rw /sys/class/gpio
 
-    # Downgrade to the 5.10.x kernel.  The 5.15.x kernel does not support GPIO correctly
-    # (10 pins are nonfunctional).
-    sudo armbian-config
-      System
-      Other
-      Press space to select "Yes, I understand".
-      Choose latest 5.10 kernel.
-      Choose "Reboot".
+        # Disable the flashing blue heartbeat LED that sinks so much power that your LEDs will
+        # severely flash twice a second if you don't.
+        echo none > /sys/class/leds/status/trigger
 
-    # Enable i2c
-    Edit the file /etc/armbianEnv.txt as root
-    Add:
+* Downgrade to the 5.10.x kernel.  The 5.15.x kernel does not support GPIO correctly
+  (10 pins are nonfunctional).  To do this:
 
-        overlays=i2c7
+  - "sudo armbian-config" and then choose:
+      - "System"
+      - "Other"
+      - Press space to select "Yes, I understand".
+      - Choose latest 5.10 kernel.
+      - Choose "Reboot".
+
+* Enable i2c
+  - Edit the file /etc/armbianEnv.txt as root
+  - Add:
+      overlays=i2c7
+
