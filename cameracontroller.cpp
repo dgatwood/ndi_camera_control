@@ -2885,7 +2885,8 @@ int set_mode(int pi, unsigned gpioPin, unsigned mode) {
 
 void *runPWMThread(void *argIgnored) {
   int pos = 0;
-  while (true) {
+
+  while (!exit_app) {
     for (int pin = 1; pin <= MAX_PINS; pin++) {
       if (soft_pwm_enabled[pin]) {
         if (pos == 0) {
@@ -2897,6 +2898,14 @@ void *runPWMThread(void *argIgnored) {
     }
     pos = (pos + 1) % 255;
   }
+
+  // Clean up quickly and terminate before we can cause a segfault.
+  for (int pin = 1; pin <= MAX_PINS; pin++) {
+    if (soft_pwm_enabled[pin]) {
+      gpio_write(0, pin, 0);
+    }
+  }
+
   return NULL;
 }
 
