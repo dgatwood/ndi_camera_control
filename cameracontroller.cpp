@@ -2561,11 +2561,15 @@ uint8_t dutyCycle(int pin) {
 // A variant of gpio_write that automatically sets a
 // duty cycle on the pin instead of just turning it on.
 bool cc_gpio_write(unsigned gpio, unsigned level) {
+#if USE_MRAA
+    return set_PWM_dutycycle(g_pig, gpio, level ? dutyCycle(gpio) : 0);
+#else  // USE_MRAA
     if (level) {
         return set_PWM_dutycycle(g_pig, gpio, dutyCycle(gpio));
     } else {
         return gpio_write(g_pig, gpio, level);
     }
+#endif  // USE_MRAA
 }
 #endif // __linux__
 
@@ -2880,12 +2884,8 @@ int set_mode(int pi, unsigned gpioPin, unsigned mode) {
 }
 
 void *runPWMThread(void *argIgnored) {
-// soft_pwm_enabled
-// soft_pwm_value
-
   int pos = 0;
   while (true) {
-    usleep(20);
     for (int pin = 1; pin <= MAX_PINS; pin++) {
       if (soft_pwm_enabled[pin]) {
         if (pos == 0) {
