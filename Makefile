@@ -17,6 +17,10 @@ ifeq ($(UNAME), Linux)
 CXXFLAGS+=-I/usr/local/NDISDK/include/ -g -O3
 LDFLAGS+=-lndi -ldl -lpthread -lavahi-client -lavahi-common
 
+ifeq ($(ARCH), unknown)
+ARCH := $(shell uname -m)
+endif
+
 ifeq ($(ARCH), aarch64)
 LDFLAGS+=-L/usr/local/NDISDK/lib/aarch64-rpi4-linux-gnueabi
 endif

@@ -78,7 +78,7 @@ Prerequisites:
 * Disable X11 in raspi-config (Raspberry Pi) or equivalent.
 
 * Install the NDI SDK from NewTek (available separately) and move the resulting folder
-  to /usr/local/lib/NDISDK (or edit the Makefile for a different location).
+  to /usr/local/NDISDK (or edit the Makefile for a different location).
 
 * Install Avahi (client and common libraries), which is typically one of the following:
 
