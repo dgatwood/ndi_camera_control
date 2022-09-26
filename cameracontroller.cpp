@@ -110,6 +110,7 @@ void *runPWMThread(void *argIgnored);
 #include "ioexpander.c"
 
 int monitor_bytes_per_pixel = 4;
+bool monitor_flipped = false;  // Controlled by the -F flag.
 bool force_slow_path = false;  // For debugging.
 
 #if __linux__
@@ -507,6 +508,10 @@ int main(int argc, char *argv[]) {
         if (!strcmp(argv[i], "-f") || !strcmp(argv[i], "--fast")) {
             fprintf(stderr, "Using low-res mode.\n");
             use_low_res_preview = true;
+        }
+        if (!strcmp(argv[i], "-F") || !strcmp(argv[i], "--flipped")) {
+            fprintf(stderr, "Flipping output\n");
+            monitor_flipped = true;
         }
         if (!strcmp(argv[i], "-V") || !strcmp(argv[i], "--enable_visca")) {
             fprintf(stderr, "Enabling VISCA-over-IP control.\n");
@@ -1012,14 +1017,6 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
         return x * g_xScaleFactor;
     }
 
-    // Takes framebuffer coordinate and returns index into frame.
-    uint32_t scaledPosition(uint32_t x, uint32_t y) {
-        static int maxPos = 0;
-        if (x > g_NDIXRes) return 0;
-        if (y > g_NDIYRes) return 0;
-        return (y * g_NDIXRes) + x;
-    }
-
     bool drawFrame(NDIlib_video_frame_v2_t *video_recv) {
         if (!configureScreen(video_recv)) {
             return false;
@@ -1033,7 +1030,9 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
             tempBuf = (unsigned char *)mmap(0, screenSize, PROT_READ | PROT_WRITE,
                                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         }
-        if (g_xScaleFactor == 1.0 && g_yScaleFactor == 1.0 && monitor_bytes_per_pixel == 4 && !force_slow_path) {
+        if (g_xScaleFactor == 1.0 && g_yScaleFactor == 1.0 && monitor_bytes_per_pixel == 4 &&
+            !monitor_flipped && !force_slow_path) {
+
             if (enable_verbose_debugging) {
                 fprintf(stderr, "fastpath\n");
             }
@@ -1051,7 +1050,9 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
                 int minRow = scaledRow(y);
                 int maxRow = scaledRow(y+1) - 1;
                 for (int x = 0; x < video_recv->xres; x++) {
-                    uint32_t *inPos = &inBuf[(y * video_recv->xres) + x];
+                    int flippedX = monitor_flipped ? video_recv->xres - x : x;
+                    int flippedY = monitor_flipped ? video_recv->yres - y : y;
+                    uint32_t *inPos = &inBuf[(flippedY * video_recv->xres) + flippedX];
                     for (int outX = scaledColumn(x); outX < scaledColumn(x+1); outX++) {
                         if (monitor_bytes_per_pixel == 4) {
                             uint32_t *outPos32 = &outBuf32[(minRow * g_framebufferXRes) + outX];
@@ -2784,6 +2785,7 @@ void runUnitTests(void) {
 
 void testPin(int pin);
 void runLightTests(void) {
+#if __linux__
   fprintf(stderr, "Testing lights.\n");
 
   testPin(LED_PIN_WHITE);
@@ -2795,9 +2797,10 @@ void runLightTests(void) {
   testPin(LED_PIN_RGB_RED);
   testPin(LED_PIN_RGB_GREEN);
   testPin(LED_PIN_RGB_BLUE);
-
+#endif  // __linux__
 }
 
+#if __linux__
 void testPin(int pin) {
   for (int i = 0 ; i < 250; i += 50) {
     set_PWM_dutycycle(0, pin, i);
@@ -2807,6 +2810,7 @@ void testPin(int pin) {
   usleep(1000000);
   set_PWM_dutycycle(0, pin, 0);
 }
+#endif  // __linux__
 
 #ifndef DEMO_MODE
 // bool debounce(int buttonNumber, bool value, motionData_t *motionData, int debounceCount);

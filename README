@@ -72,8 +72,60 @@ Prerequisites:
 
   https://github.com/dgatwood/ioe-c
 
-  and symlink the files constants.h and ioexpander.c into the
+  and symlink or copy the files constants.h and ioexpander.c into the
   source folder.
+
+* Disable X11 in raspi-config (Raspberry Pi) or equivalent.
+
+* Install the NDI SDK from NewTek (available separately) and move the resulting folder
+  to /usr/local/lib/NDISDK (or edit the Makefile for a different location).
+
+* Install Avahi (client and common libraries), which is typically one of the following:
+
+        sudo apt-get install avahi-utils avahi-daemon libavahi-client-dev libnss-mdns
+        sudo apt-get install avahi-client3 avahi-daemon libavahi-client-dev libnss-mdns
+
+* Install the correct GPIO library:
+  - For Raspberry Pi, install pigpiod and enable the daemon.  (libmraa may also work.)
+  - For Rock Pi, install libmraa with apt:
+
+        sudo apt-get install libmraa-rockpi4 or
+        sudo apt-get install libmraa
+
+    or build and install it from source code (https://github.com/eclipse/mraa).
+
+* Configure dhcpcd on your device to use a static IP fallback in the same IP range as your cameras
+  (typically 192.168.100.x).  For example, on Raspberry Pi:
+
+        profile static_eth0
+        static ip_address=192.168.100.23/24
+        static routers=192.168.100.1
+        static domain_name_servers=192.168.100.1
+        interface eth0
+        fallback static_eth0
+
+* Add NDI to the ld.so configuration file:
+
+  - Create a file named /etc/ld.so.conf.d/ndi.conf and paste in one of the following:
+
+        /usr/local/NDISDK/lib/arm-rpi4-linux-gnueabihf
+        /usr/local/NDISDK/lib/aarch64-rpi4-linux-gnueabi
+
+    depending on your CPU architecture, adjusting the path as needed based on where you
+    installed the SDK.  Then run
+
+        sudo ldconfig
+
+    to update the cache.
+
+* Follow the hardware-specific configuration instructions for your board below.
+
+* Build the custom hardware.
+
+
+--------------------------
+Raspberry Pi Configuration
+--------------------------
 
 * Configure the console to use 32 bpp if necessary (Raspberry Pi).  In config.txt, add/change:
 
@@ -83,7 +135,7 @@ Prerequisites:
         dtparam=i2c_arm=on
         dtparam=spi=on
 
-* For HDMI panels (Raspberry Pi), add/change:
+* For HDMI panels (Raspberry Pi).  In config.txt, add/change:
 
         max_usb_current=1
         hdmi_force_hotplug=1
@@ -91,65 +143,102 @@ Prerequisites:
         hdmi_mode=16
         hdmi_drive=2
 
-* For DSI panels (Raspberry Pi), add/change:
+* For DSI panels (Raspberry Pi).  In config.txt, add/change:
 
         video=DSI-1:1920x1080@60
         framebuffer_width=1920
         framebuffer_height=1080
 
-* Disable the videocore 3D driver (Raspberry Pi) by commenting out the following line:
+  If this doesn't work, try 1920x1080@30.
+
+* Disable the videocore 3D driver (Raspberry Pi) by commenting out the following line
+  in config.txt:
 
         # dtoverlay=vc4-fkms-v3d
 
-* Disable the blinking cursor on the virtual console that you plan to use.
+* Disable the blinking cursor on the virtual console that you plan to use by editing
+  cmdline.txt.  Change the console to:
 
-  - For Raspberry Pi:
+        console=tty3
 
-    In cmdline.txt, change the console to:
+  And add:
 
-      console=tty3
+        ,vt.global_cursor_default=0
 
-    And add:
-      vt.global_cursor_default=0
+  to the end.
 
-  - For Rock Pi:
 
-    TBD
+---------------------
+Rock Pi Configuration
+---------------------
 
-* Disable X11 in raspi-config (Raspberry Pi) or equivalent.
-* Install the NDI SDK from NewTek (available separately).
-* Install Avahi (client and common libraries).
+I recommend starting with the official Debian distro, being sure to get the Bullseye version.
+Unfortunately, I was unable to get DSI working on Armbian, so I gave up.  And the official
+Ubuntu Server distro has nonfunctional Wi-Fi, or at least I only got it to connect twice,
+with hundreds of failures in between.
 
-* For Raspberry Pi:
-  - Install pigpiod and enable the daemon.
-* For Rock Pi
-  - Install libmraa with apt (sudo apt-get install libmraa-rockpi4) or
-    build and install it from source code (https://github.com/eclipse/mraa).
+On Rock Pi, you must also perform the following changes:
 
-* Build the custom hardware.
-* Configure dhcpcd on your device to use a static IP fallback in the same IP range as your cameras
-  (typically 192.168.100.x).  For example, on Raspberry Pi:
+* Add the following to your /etc/rc.local:
 
-  profile static_eth0
-  static ip_address=192.168.100.23/24
-  static routers=192.168.100.1
-  static domain_name_servers=192.168.100.1
-  interface eth0
-  fallback static_eth0
+        # Disable the flashing blue heartbeat LED that sinks so much power that your LEDs will
+        # severely flash twice a second if you don't.
+        echo none > /sys/class/leds/user-led2/trigger
 
-* Add NDI to ld.so configuration if it is not there already:
+  If that doesn't work, use this instead:
 
-  Create a file named /etc/ld.so.conf.d/ndi.conf and paste in one of the following:
+        # Disable the flashing blue heartbeat LED that sinks so much power that your LEDs will
+        # severely flash twice a second if you don't.
+        echo none > /sys/class/leds/status/trigger
 
-    /usr/local/NDISDK/lib/arm-rpi4-linux-gnueabihf
-    /usr/local/NDISDK/lib/aarch64-rpi4-linux-gnueabi
+* Downgrade to the 5.10.x kernel for HDMI or 4.4.154-90 for DSI.  The 5.15.x kernel does not
+  support GPIO correctly (10 pins are nonfunctional), and 5.10.x does not support DSI.
 
-  depending on your CPU architecture, adjusting the path as needed based on where you
-  installed the SDK.  Then run
+* Enable I2C
+  - Edit the file /boot/hw_intfc.conf as root.
+  - Change:
 
-    sudo ldconfig
+        intfc:i2c7=off
 
-  to update the cache.
+    to:
+
+        intfc:i2c7=on
+
+* Enable DSI (if not using HDMI)
+
+  - Edit the file /boot/hw_intfc.conf as root and uncomment this line:
+
+        intfc:dtoverlay=raspberrypi-7-inch-lcd
+
+  - Edit the file extlinux/extlinux.conf as root.  In each of the "append" lines, add:
+
+        append ...existing arguments here... console=tty3 vt.global_cursor_default=0
+
+    all on one line.  Note that it must be 30 fps or the screen won't light up.  It
+    also won't light up at the screen's native resolution of 800x480.
+
+  - There's no way to rotate the display in hardware, so you'll have to add the -F flag
+    when running the tool.
+
+* If you want to run as a non-root user:
+  - Create a GPIO group and add yourself to it:
+
+        sudo addgroup gpiouser
+        usermod -a -G gpiouser yourusername
+
+  - Create a file called /etc/udev/rules.d/99-gpio.rules and paste the following:
+
+        SUBSYSTEM=="gpio", PROGRAM="/bin/sh -c '\
+          chown -R root:gpiouser /sys/devices/platform/pinctrl/gpio /sys/class/gpio &&\
+          chmod -R 770 /sys/devices/platform/pinctrl/gpio /sys/class/gpio'"
+        KERNEL=="gpio*", GROUP="gpiouser"
+        KERNEL=="gpiochip*", GROUP="gpiouser"
+
+  - Add the following to /etc/rc.local:
+
+        # Change ownership of various stuff so that you can touch GPIO as a non-root user.
+        chown -R root:gpiouser /sys/class/gpio
+        chmod -R ug+rw /sys/class/gpio
 
 
 -------------------
@@ -178,6 +267,9 @@ General flags:
                                    stream is requested.  This can be helpful for cameras that
                                    produce higher bitrate streams.  (You can play NDI-HX streams
                                    from iOS devices without this flag.)
+
+  -F / --flip                   -- Flips the screen while drawing.  Proper framebuffer flipping is
+                                   better, but this is all we have on some platforms.
 
   -D / --duty_cycle             -- Sets the duty cycle that should be used for all LEDs
                                    (range 0 to 255).
@@ -249,35 +341,3 @@ https://docs.google.com/document/d/1Ss_mx8vgRw_ys8ocJK7LZhjXRocf9EI3qovyQXoxxJw/
 or in the hardware directory.
 
 Enjoy!
-
-----------------
-Rock Pi Addendum
-----------------
-
-On Rock Pi, you must also perform the following changes:
-
-* Add the following to your /etc/rc.local:
-
-        # Change ownership of various stuff so that you can touch GPIO as a non-root user.
-        chown -R root:gpiouser /sys/class/gpio
-        chmod -R ug+rw /sys/class/gpio
-
-        # Disable the flashing blue heartbeat LED that sinks so much power that your LEDs will
-        # severely flash twice a second if you don't.
-        echo none > /sys/class/leds/status/trigger
-
-* Downgrade to the 5.10.x kernel.  The 5.15.x kernel does not support GPIO correctly
-  (10 pins are nonfunctional).  To do this:
-
-  - "sudo armbian-config" and then choose:
-      - "System"
-      - "Other"
-      - Press space to select "Yes, I understand".
-      - Choose latest 5.10 kernel.
-      - Choose "Reboot".
-
-* Enable i2c
-  - Edit the file /etc/armbianEnv.txt as root
-  - Add:
-      overlays=i2c7
-
