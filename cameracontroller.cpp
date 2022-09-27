@@ -1050,8 +1050,8 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
                 int minRow = scaledRow(y);
                 int maxRow = scaledRow(y+1) - 1;
                 for (int x = 0; x < video_recv->xres; x++) {
-                    int flippedX = monitor_flipped ? video_recv->xres - x : x;
-                    int flippedY = monitor_flipped ? video_recv->yres - y : y;
+                    int flippedX = monitor_flipped ? video_recv->xres - x - 1 : x;
+                    int flippedY = monitor_flipped ? video_recv->yres - y - 1 : y;
                     uint32_t *inPos = &inBuf[(flippedY * video_recv->xres) + flippedX];
                     for (int outX = scaledColumn(x); outX < scaledColumn(x+1); outX++) {
                         if (monitor_bytes_per_pixel == 4) {
