@@ -2869,8 +2869,7 @@ int gpio_write(int pi, unsigned gpioPin, unsigned level) {
   return mraa_gpio_write(gpio_contexts[gpioPin], level ? 1 : 0) == MRAA_SUCCESS;
 }
 
-// The set_mode call we are emulating returns 0 on success, so we must do so as well.
-int set_mode(int pi, unsigned gpioPin, unsigned mode) {
+int set_mode_sub(int pi, unsigned gpioPin, unsigned mode) {
   fprintf(stderr, "Initializing pin %d\n", gpioPin);
   if (gpio_contexts[gpioPin] == NULL) {
     gpio_contexts[gpioPin] = mraa_gpio_init(gpioPin);
@@ -2883,6 +2882,21 @@ int set_mode(int pi, unsigned gpioPin, unsigned mode) {
   bool retval = (mraa_gpio_dir(gpio_contexts[gpioPin], MRAA_GPIO_OUT) != MRAA_SUCCESS);
   if (retval) {
     fprintf(stderr, "Could not initialize pin %d: Unable to set direction.\n", gpioPin);
+  }
+  return retval;
+}
+
+// The set_mode call we are emulating returns 0 on success, so we must do so as well.
+// Unfortunately, when we create a GPIO pin entry, it takes a bit of time for it to get
+// the right group and permissions, so we may have to retry a few times.
+int set_mode(int pi, unsigned gpioPin, unsigned mode) {
+  int retval = 1;
+  for (int i = 0; i < 10; i++) {
+    retval = set_mode_sub(pi, gpioPin, mode);
+    if (retval == 0) {
+      return retval;
+    }
+    usleep(100000);
   }
   return retval;
 }
