@@ -156,14 +156,18 @@ Raspberry Pi Configuration
 
         # dtoverlay=vc4-fkms-v3d
 
+  This may or may not be necessary.  It was in the version of Raspbian that I was using,
+  without which I couldn't force the display into 24bpp or the correct resolution, and
+  I was always doing software scaling, which isn't ideal.  But YMMV.
+
 * Disable the blinking cursor on the virtual console that you plan to use by editing
   cmdline.txt.  Change the console to:
 
         console=tty3
 
-  And add:
+  to ensure the output doesn't get clobbered by log messages, then add:
 
-        ,vt.global_cursor_default=0
+        vt.global_cursor_default=0
 
   to the end.
 
@@ -184,12 +188,9 @@ On Rock Pi, you must also perform the following changes:
         # Disable the flashing blue heartbeat LED that sinks so much power that your LEDs will
         # severely flash twice a second if you don't.
         echo none > /sys/class/leds/user-led2/trigger
-
-  If that doesn't work, use this instead:
-
-        # Disable the flashing blue heartbeat LED that sinks so much power that your LEDs will
-        # severely flash twice a second if you don't.
         echo none > /sys/class/leds/status/trigger
+
+  One of those two lines should work, depending on kernel version.
 
 * Downgrade to the 5.10.x kernel for HDMI or 4.4.154-90 for DSI.  The 5.15.x kernel does not
   support GPIO correctly (10 pins are nonfunctional), and 5.10.x does not support DSI.
@@ -212,19 +213,25 @@ On Rock Pi, you must also perform the following changes:
 
   - Edit the file extlinux/extlinux.conf as root.  In each of the "append" lines, add:
 
-        append ...existing arguments here... console=tty3 vt.global_cursor_default=0
+        append ...existing arguments here... vt.global_cursor_default=0 fake_vsync_isr=1 
 
-    all on one line.  Note that it must be 30 fps or the screen won't light up.  It
-    also won't light up at the screen's native resolution of 800x480.
+    all on one line.
 
-  - There's no way to rotate the display in hardware, so you'll have to add the -F flag
-    when running the tool.
+  - If there's a console=tty1 in that line, change it to tty3 so that log messages won't clobber
+    the video output.
+
+  - There's no way to rotate the display in hardware on Rock Pi (that I could find), so you'll have
+    to add the -F flag when running the tool if you need to flip the panel's output.
 
 * If you want to run as a non-root user:
   - Create a GPIO group and add yourself to it:
 
         sudo addgroup gpiouser
-        usermod -a -G gpiouser yourusername
+        sudo usermod -a -G gpiouser yourusername
+
+  - Add yourself to the i2c group (or whatever group owns /dev/i2c-7).
+
+        sudo usermod -a -G i2c yourusername
 
   - Create a file called /etc/udev/rules.d/99-gpio.rules and paste the following:
 
@@ -240,6 +247,7 @@ On Rock Pi, you must also perform the following changes:
         chown -R root:gpiouser /sys/class/gpio
         chmod -R ug+rw /sys/class/gpio
 
+  - Reboot.
 
 -------------------
 Command-line flags:
