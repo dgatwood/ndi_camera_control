@@ -169,8 +169,11 @@ Raspberry Pi Configuration
 
         vt.global_cursor_default=0
 
-  to the end.
+  to the end.  Then disable console blanking so that your screen doesn't go black by adding
 
+        consoleblank=0
+
+  to that line as well.
 
 ---------------------
 Rock Pi Configuration
@@ -213,7 +216,7 @@ On Rock Pi, you must also perform the following changes:
 
   - Edit the file extlinux/extlinux.conf as root.  In each of the "append" lines, add:
 
-        append ...existing arguments here... vt.global_cursor_default=0 fake_vsync_isr=1 
+        append ...existing arguments here... vt.global_cursor_default=0 fake_vsync_isr=1 consoleblank=0
 
     all on one line.
 
