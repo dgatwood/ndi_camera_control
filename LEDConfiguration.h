@@ -31,8 +31,8 @@
     // Raspberry Pi 4
     #define LED_PIN_WHITE 5
     #define LED_PIN_RED 6
-    #define LED_PIN_YELLOW 13 
-    #define LED_PIN_GREEN 19 
+    #define LED_PIN_YELLOW 13
+    #define LED_PIN_GREEN 19
     #define LED_PIN_BLUE 26
     #define LED_PIN_PURPLE 12
 

@@ -144,6 +144,8 @@ bool enable_visca_ptz = false;
 bool visca_running = false;
 bool use_visca_for_presets = false;
 
+int gMaxZoomValue = 8;
+
 #pragma mark - Constants and types
 
 #define safe_asprintf(a, b...) { int retval = asprintf(a, b); \
@@ -256,7 +258,7 @@ bool g_camera_active = false;
 bool g_camera_preview = false;
 bool g_camera_malfunctioning = false;
 
- 
+
 // Specs are for Marshall cameras.  Other cameras may differ.
 // Shutter Speed | 60/30fps | 50/25fps
 // --------------|----------|---------
@@ -615,6 +617,7 @@ int main(int argc, char *argv[]) {
 
 #ifdef __linux__
 #ifndef DEMO_MODE
+fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
     io_expander = newIOExpander(PIMORONI_I2C_FILENAME, I2C_ADDRESS, 0, -1, 0, false);
     if (io_expander) {
         for (int pin = kPTZAxisX; pin <= kPTZAxisZoom; pin++) {
@@ -752,10 +755,10 @@ int main(int argc, char *argv[]) {
                 if (!receiver_item->thread_data->running) {
                     if (receiver_item->receiver != nullptr) {
                         // Clean up the NDI receiver (stops packet transmission).
-            
+
                         printf("Closing the connection.\n");
                         p_NDILib->NDIlib_recv_connect(receiver_item->receiver, NULL);
-            
+
                         printf("Destroying the NDI receiver.\n");
                         p_NDILib->NDIlib_recv_destroy(receiver_item->receiver);
                         printf("The NDI receiver has been destroyed.\n");
@@ -874,7 +877,7 @@ void *runNDIRunLoop(void *receiver_thread_data_ref) {
                     g_avahi_simple_poll = NULL;
                     g_avahi_client = NULL;
                     g_avahi_service_browser = NULL;
-    
+
                     visca_running = connectVISCA(stream_name, "2");
                 }
             }
@@ -1078,7 +1081,7 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
 
         int zero = 0;
         if (ioctl(g_framebufferFileHandle, FBIO_WAITFORVSYNC, &zero) == -1) {
-            perror("cameracontroller:  FBIO_WAITFORVSYNC");
+            if (enable_debugging) perror("cameracontroller:  FBIO_WAITFORVSYNC");
         }
         bcopy(tempBuf, g_framebufferBase, screenSize);
 
@@ -1664,6 +1667,7 @@ int connectToVISCAPortWithAddress(const struct sockaddr *address) {
     return sock;
 }
 
+void updateVISCAMaxSpeed(int sock);
 void updateTallyLightsOverVISCA(int sock);
 void sendZoomUpdatesOverVISCA(int sock, motionData_t *motionData);
 void sendPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData);
@@ -1674,6 +1678,7 @@ void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
 #ifdef P2_HACK
     sendZoomUpdatesOverP2(g_visca_sock, motionData);
 #else
+    updateVISCAMaxSpeed(g_visca_sock);
     updateTallyLightsOverVISCA(g_visca_sock);
     if (enable_visca_ptz) {
         sendZoomUpdatesOverVISCA(g_visca_sock, motionData);
@@ -1689,6 +1694,37 @@ void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
 static uint32_t g_visca_sequence_number = 0;
 void send_visca_packet(int sock, uint8_t *buf, ssize_t bufsize, int timeout_usec);
 uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout_usec, ssize_t *responseLength);
+
+// Custom VISCA command, because 8 speeds aren't enough to properly drive Panasonic cameras.  This is a
+// nonstandard command specific to the VISCAPTZ project.  On all actual VISCA devices, this will fail,
+// hence the large response packet with known values.
+void updateVISCAMaxSpeed(int sock) {
+    static struct timeval lastCheck = { 0, 0 };
+    struct timeval curTime;
+
+    gettimeofday(&curTime, NULL);
+
+    // This should never change.
+    if ((curTime.tv_sec - lastCheck.tv_sec) < 5) return;
+
+    lastCheck = curTime;
+
+    uint8_t buf[7] = { 0x81, 0x09, 0x04, 0x07, 0xFF };  // Custom max zoom speed command
+    ssize_t responseLength = 0;
+    uint8_t *responseBuf = send_visca_inquiry(sock, buf, sizeof(buf), 20000, &responseLength);
+    if (responseBuf && responseLength == 13 &&
+            responseBuf[1] == 0x50 && responseBuf[2] == 0xde &&
+            responseBuf[3] == 0xad && responseBuf[4] == 0xbe &&
+            responseBuf[5] == 0xef && responseBuf[6] == 0xfe &&
+            responseBuf[7] == 0xed && responseBuf[8] == 0xba &&
+            responseBuf[9] == 0xbe && responseBuf[12] == 0xff) {
+        gMaxZoomValue = responseBuf[10] << 8 | responseBuf[11];
+        fprintf(stderr, "Max zoom value changed to %d\n", gMaxZoomValue);
+    } else {
+        fprintf(stderr, "Bad response %s for max zoom value (length %d).\n", 
+            fmtbuf(responseBuf, responseLength), responseLength);
+    }
+}
 
 void updateTallyLightsOverVISCA(int sock) {
     static struct timeval lastCheck = { 0, 0 };
@@ -1774,24 +1810,46 @@ void sendZoomUpdatesOverP2(int sock, motionData_t *motionData) {
 #endif
 
 void sendZoomUpdatesOverVISCA(int sock, motionData_t *motionData) {
-    uint8_t buf[6] = { 0x81, 0x01, 0x04, 0x07, 0x00, 0xFF };
-    int level = (int)(motionData->zoomPosition * 8.9);
+    if (gMaxZoomValue != 8) {
+        // Use a nonstandard VISCA command with a much larger zoom speed range.
+        uint8_t buf[8] = { 0x81, 0x01, 0x04, 0x07, 0x00, 0x00, 0x00, 0xFF };
+        int level = (int)(motionData->zoomPosition * (gMaxZoomValue + 0.9));
+        static int last_zoom_level = 0;
 
-    static int last_zoom_level = 0;
+        if (level == last_zoom_level) {
+            return;
+        }
+        last_zoom_level = level;
 
-    if (level == last_zoom_level) {
-        return;
+        buf[4] = (level < 0) ? 0x2f : 0x3f;
+        buf[5] = (abs(level) >> 8) & 0xff;
+        buf[6] = abs(level) & 0xff;
+
+        if (enable_ptz_debugging) {
+            fprintf(stderr, "zoom speed: %d buf: 0x%02x\n", level, buf[4]);
+        }
+    
+        send_visca_packet(sock, buf, sizeof(buf), 100000);
+    } else {
+        uint8_t buf[6] = { 0x81, 0x01, 0x04, 0x07, 0x00, 0xFF };
+        int level = (int)(motionData->zoomPosition * (8.9));
+
+        static int last_zoom_level = 0;
+
+        if (level == last_zoom_level) {
+            return;
+        }
+        last_zoom_level = level;
+
+        if (level != 0) {
+            buf[4] = (abs(level) - 1) | (level < 0 ? 0x20 : 0x30);
+        }
+        if (enable_ptz_debugging) {
+            fprintf(stderr, "zoom speed: %d buf: 0x%02x\n", level, buf[4]);
+        }
+
+        send_visca_packet(sock, buf, sizeof(buf), 100000);
     }
-    last_zoom_level = level;
-
-    if (level != 0) {
-        buf[4] = (abs(level) - 1) | (level < 0 ? 0x20 : 0x30);
-    }
-    if (enable_ptz_debugging) {
-        fprintf(stderr, "zoom speed: %d buf: 0x%02x\n", level, buf[4]);
-    }
-
-    send_visca_packet(sock, buf, sizeof(buf), 100000);
 }
 
 void sendPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData) {
@@ -1903,6 +1961,7 @@ uint8_t *get_ack_data(int sock, int timeout_usec, ssize_t *len);
 void send_visca_packet_raw(int sock, uint8_t *buf, ssize_t bufsize, int timeout_usec, bool isInquiry);
 
 uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout_usec, ssize_t *responseLength) {
+    bool localDebug = false || enable_verbose_debugging;
     if (sock == -1) return NULL;
 
     send_visca_packet_raw(sock, buf, bufsize, timeout_usec, true);
@@ -1916,15 +1975,15 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
         int sequence_number = g_visca_sequence_number - 1;
         if (g_visca_use_udp) {
             if (response[0] != 0x01 ||
-                response[1] != 0x11 ||
+                response[1] != 0x11 /* ||
                 response[2] != 0x00 ||
-                response[3] != 0x04 /* ||
+                response[3] != 0x04 */ /* ||
                 response[4] != sequence_number >> 24 ||
                 response[5] != (sequence_number >> 16) & 0xff ||
                 response[6] != (sequence_number >> 8) & 0xff ||
                 response[7] != sequence_number & 0xff */) {
-                if (enable_verbose_debugging) {
-                    fprintf(stderr, "Unexpected response packet %s\n", fmtbuf(response, localResponseLength));
+                if (localDebug) {
+                    fprintf(stderr, "Unexpected response packet[1] %s\n", fmtbuf(response, localResponseLength));
                     fprintf(stderr, "Expected %02x %02x %02x %02x %02x %02x %02x %02x\n", 1, 0x11, 0, 4, sequence_number >> 24,
                             (sequence_number >> 16) & 0xff, (sequence_number >> 8) & 0xff, sequence_number & 0xff);
                 }
@@ -1932,8 +1991,8 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
             }
         }
         if (response[1 + udp_offset] != 0x50) {
-            if (enable_verbose_debugging) {
-                fprintf(stderr, "Unexpected response packet %s\n", fmtbuf(response, localResponseLength));
+            if (localDebug) {
+                fprintf(stderr, "Unexpected response packet[2] %s\n", fmtbuf(response, localResponseLength));
             }
             valid = false;
         }
@@ -2603,7 +2662,7 @@ motionData_t getMotionData() {
 // a longer delay makes it not work well.  However, no delay causes the NDI side
 // to drop pan commands, resulting in the camera continuing to pan indefinitely
 // even after you stop panning.
-// 
+//
 // The goal was to do this only 200 times per second.  By only doing this
 // periodically, we limit the amount of CPU overhead, leaving more cycles to do
 // the actual H.264 or H.265 decoding.
