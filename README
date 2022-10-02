@@ -186,6 +186,11 @@ with hundreds of failures in between.
 
 On Rock Pi, you must also perform the following changes:
 
+* Uncomment the following line in /etc/sysctl.conf to keep the console clean of
+  kernel log messages:
+
+        kernel.printk = 3 4 1 3
+
 * Add the following to your /etc/rc.local:
 
         # Disable the flashing blue heartbeat LED that sinks so much power that your LEDs will
