@@ -2704,6 +2704,14 @@ void truncate_name_before_ip(char *name) {
             break;
         }
     }
+
+    // If there was no comma, truncate the final close parenthesis to
+    // allow matches across firmware changes that remove the IP address
+    // from the name.
+    ssize_t lastpos = strlen(name) - 1;
+    if (lastpos >= 0 && name[lastpos] == ')') {
+            name[lastpos] = '\0';
+    }
 }
 
 bool source_name_compare(const char *name1, const char *name2, bool use_fallback) {
@@ -2719,6 +2727,7 @@ bool source_name_compare(const char *name1, const char *name2, bool use_fallback
 
     bool retval = !strcmp(truncname1, truncname2);
     if (enable_verbose_debugging) {
+        fprintf(stderr, "CMP \"%s\" ?= \"%s\" : %s\n", name1, name2);
         fprintf(stderr, "CMP \"%s\" ?= \"%s\" : %s\n", truncname1, truncname2,
                 retval ? "true" : "false");
     }
