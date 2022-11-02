@@ -27,7 +27,6 @@
     #define LED_PIN_RGB_GREEN 38 // GPIO4_A6 GPIO 134
     #define LED_PIN_RGB_BLUE 40  // GPIO4_A7 GPIO 135
 #else
-#error RPI
     // Raspberry Pi 4
     #define LED_PIN_WHITE 5
     #define LED_PIN_RED 6
