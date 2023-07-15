@@ -23,16 +23,22 @@
 
 #include <Processing.NDI.Lib.h>
 
+/**
+ * Cube the motion values to allow for more precise control at slower speeds.
+ * Increase this constant if you find that slower speeds are unreachable.
+ */
+const float kPowerMultiplier = 3.0;
+
 #define VISCA_ACK_TIMEOUT 100000  /* 100 msec */
 #define MIN_TALLY_INTERVAL 100000 /* 100 msec */
 #define PULSES_PER_BLINK 2
-
-static float kCenterMotionThreshold = 0.05;
 
 // Playing with P2 protocol.  Will delete later.
 #undef P2_HACK
 
 #define USE_VISCA_FOR_EXPOSURE_COMPENSATION
+
+#undef ENABLE_FILES_FOR_BUTTON_TESTING
 
 #ifdef __linux__
 #define USE_AVAHI
@@ -105,6 +111,8 @@ void *runPWMThread(void *argIgnored);
     #import <AppKit/AppKit.h>
     #import <CoreServices/CoreServices.h>
     #import <ImageIO/ImageIO.h>
+
+    #define ENABLE_FILES_FOR_BUTTON_TESTING
 #endif  // __linux__
 
 #include "ioexpander.c"
@@ -145,6 +153,7 @@ bool visca_running = false;
 bool use_visca_for_presets = false;
 
 int gMaxZoomValue = 8;
+int gMaxPanTiltValue = 0;  // Default is normal VISCA commands.
 
 #pragma mark - Constants and types
 
@@ -1712,17 +1721,18 @@ void updateVISCAMaxSpeed(int sock) {
     uint8_t buf[7] = { 0x81, 0x09, 0x04, 0x07, 0xFF };  // Custom max zoom speed command
     ssize_t responseLength = 0;
     uint8_t *responseBuf = send_visca_inquiry(sock, buf, sizeof(buf), 20000, &responseLength);
-    if (responseBuf && responseLength == 13 &&
+    if (responseBuf && responseLength == 15 &&
             responseBuf[1] == 0x50 && responseBuf[2] == 0xde &&
             responseBuf[3] == 0xad && responseBuf[4] == 0xbe &&
             responseBuf[5] == 0xef && responseBuf[6] == 0xfe &&
             responseBuf[7] == 0xed && responseBuf[8] == 0xba &&
-            responseBuf[9] == 0xbe && responseBuf[12] == 0xff) {
+            responseBuf[9] == 0xbe && responseBuf[14] == 0xff) {
         gMaxZoomValue = responseBuf[10] << 8 | responseBuf[11];
+        gMaxPanTiltValue = responseBuf[12] << 8 | responseBuf[13];
         fprintf(stderr, "Max zoom value changed to %d\n", gMaxZoomValue);
     } else {
-        fprintf(stderr, "Bad response %s for max zoom value (length %d).\n", 
-            fmtbuf(responseBuf, responseLength), responseLength);
+        fprintf(stderr, "Bad response %s for max zoom value (length %" PRId64 ").\n", // ssize_t
+            fmtbuf(responseBuf, responseLength), (uint64_t)responseLength);
     }
 }
 
@@ -1852,10 +1862,56 @@ void sendZoomUpdatesOverVISCA(int sock, motionData_t *motionData) {
     }
 }
 
+void sendExtendedPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData);
 void sendPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData) {
+    if (gMaxPanTiltValue != 0) {
+      sendExtendedPanTiltUpdatesOverVISCA(sock, motionData);
+      return;
+    }
     const bool localDebug = false;
     int pan_level = (int)(motionData->xAxisPosition * 24.9);
     int tilt_level = (int)(motionData->yAxisPosition * 23.9);
+    // fprintf(stderr, "VISCA MODE: %d, %d\n", pan_level, tilt_level);
+
+    static int last_pan_level = 0;
+    static int last_tilt_level = 0;
+
+    if (pan_level == last_pan_level && tilt_level == last_tilt_level) {
+        return;
+    }
+    last_pan_level = pan_level;
+    last_tilt_level = tilt_level;
+
+    bool left = pan_level > 0;
+    bool right = pan_level < 0;
+    bool up = tilt_level > 0;
+    bool down = tilt_level < 0;
+
+    if (localDebug) fprintf(stderr, "%s %s %s %s %d %d\n",
+                            left ? "true" : "false",
+                            right ? "true" : "false",
+                            up ? "true" : "false",
+                            down ? "true" : "false",
+                            pan_level,
+                            tilt_level);
+
+    uint8_t pan_command = left ? 0x01 : right ? 0x2 : 0x3;
+    uint8_t tilt_command = up ? 0x01 : down ? 0x2 : 0x3;
+
+    uint8_t buf[9] = { 0x81, 0x01, 0x06, 0x01, 0x00, 0x00, pan_command, tilt_command, 0xFF };
+
+    buf[4] = abs(pan_level) ?: 1; // Pan speed: 1 to 24 (0x18)
+    buf[5] = abs(tilt_level) ?: 1; // Pan speed: 1 to 24 (0x18)
+
+    if (localDebug) fprintf(stderr, "Sent packet %s\n", fmtbuf(buf, 9));
+
+    send_visca_packet(sock, buf, sizeof(buf), 100000);
+}
+
+void sendExtendedPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData) {
+    const bool localDebug = false;
+    int pan_level = (int)(motionData->xAxisPosition * (gMaxPanTiltValue + 0.9));
+    int tilt_level = (int)(motionData->yAxisPosition * (gMaxPanTiltValue + 0.9));
 
     static int last_pan_level = 0;
     static int last_tilt_level = 0;
@@ -1882,10 +1938,15 @@ void sendPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData) {
     uint8_t pan_command = left ? 0x01 : right ? 0x02 : 0x03;
     uint8_t tilt_command = up ? 0x01 : down ? 0x02 : 0x03;
 
-    uint8_t buf[9] = { 0x81, 0x01, 0x06, 0x01, 0x00, 0x00, pan_command, tilt_command, 0xFF };
+    uint8_t buf[13] = { 0x81, 0x01, 0x06, 0x01, 0x00, 0x00, // Extended command.
+                        0x00, 0x00, // Pan (big endian)
+                        0x00, 0x00, // Tilt (big endian)
+                        pan_command, tilt_command, 0xFF };
 
-    buf[4] = abs(pan_level) ?: 1; // Pan speed: 1 to 24 (0x18)
-    buf[5] = abs(tilt_level) ?: 1; // Pan speed: 1 to 24 (0x18)
+    buf[6] = (abs(pan_level) >> 8) & 0xff;
+    buf[7] = pan_level & 0xff;
+    buf[8] = (abs(tilt_level) >> 8) & 0xff;
+    buf[9] = tilt_level & 0xff;
 
     if (localDebug) fprintf(stderr, "Sent packet %s\n", fmtbuf(buf, 9));
 
@@ -2149,6 +2210,7 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     }
 
     if (!enable_visca_ptz || !visca_running || g_visca_sock == -1) {
+        // fprintf(stderr, "NDI MODE: %f, %f\n", copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
         NDIlib_recv_ptz_pan_tilt_speed(pNDI_recv, copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
 
         if (enable_ptz_debugging) {
@@ -2207,28 +2269,31 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
  *        be built to generate positive and negative values accordingly.
  */
 float readAxisPosition(int axis) {
-    #ifdef __linux__
+    #ifndef ENABLE_FILES_FOR_BUTTON_TESTING
 	if (!io_expander) return 0;
         int pin = pinNumberForAxis(axis);
         int rawValue = input(io_expander, pin, 0.001) - 2048;
-        if (axis == kPTZAxisZoom && abs(rawValue) < 100) {
-            rawValue = 0;  // Minimum motion threshold.
-        } else if (abs(rawValue) < 10) {
-            rawValue = 0;  // Minimum motion threshold.
-        }
-        float value = rawValue / 2048.0;
-        if (value < 0) {
-            value = value * -value;  // Logarithmic curve.
-        } else {
-            value = value * value;  // Logarithmic curve.
-        }
-        if (value > -kCenterMotionThreshold && value < kCenterMotionThreshold) { value = 0; }  // Keep the center stable.
+
+        // rawValue is in the range -2048 to 2048
+	uint32_t absRawValue = abs(rawValue);
+	uint32_t minThreshold = 100;
+
+	// Center nulled value is now in the range 0 to 1948, with small values zeroed.
+        uint32_t centerNulledValue = absRawValue < minThreshold ? 0 : absRawValue - minThreshold;
+
+	// Value is in the range 0 to 1.
+        float value = rawValue / 1948.0;
+
+	// Cube the value to make it easier to move at lower speeds.
+        value = pow(value, kPowerMultiplier);
+        if (rawValue < 0) value = -value;
 
         if (enable_ptz_debugging) {
             fprintf(stderr, "axis %d: raw: %d scaled: %f ", axis, rawValue, value);
         }
         return value;
-    #else  // ! __linux__
+    #else  // ENABLE_FILES_FOR_BUTTON_TESTING
+        bool localDebug = false;
         char *filename;
         safe_asprintf(&filename, "/var/tmp/axis.%d", axis);
         FILE *fp = fopen(filename, "r");
@@ -2237,12 +2302,12 @@ float readAxisPosition(int axis) {
         if (fp) {
             fscanf(fp, "%f\n", &value);
             fclose(fp);
-            if (enable_ptz_debugging) {
+            if (enable_ptz_debugging || localDebug) {
                 fprintf(stderr, "Returning %f for axis %d\n", value, axis);
             }
             return value;
         }
-        if (enable_verbose_debugging) {
+        if (enable_verbose_debugging || localDebug) {
             fprintf(stderr, "Returning 0.0 (default) for axis %d\n", axis);
         }
         return 0.0;
@@ -2434,9 +2499,9 @@ void updateLights(motionData_t *motionData) {
 
     litButtons &= ~setButtonMask;
     litButtons |= motionData->setMode;
-    if (fabs(motionData->xAxisPosition) > kCenterMotionThreshold ||
-        fabs(motionData->yAxisPosition) > kCenterMotionThreshold ||
-        fabs(motionData->zoomPosition) > kCenterMotionThreshold) {
+    if (fabs(motionData->xAxisPosition) > 0 ||
+        fabs(motionData->yAxisPosition) > 0 ||
+        fabs(motionData->zoomPosition) > 0) {
             // Reset.
             // fprintf(stderr, "LIGHTS: Motion\n");
             litButtons &= ~mainButtonMask;
@@ -2727,7 +2792,7 @@ bool source_name_compare(const char *name1, const char *name2, bool use_fallback
 
     bool retval = !strcmp(truncname1, truncname2);
     if (enable_verbose_debugging) {
-        fprintf(stderr, "CMP \"%s\" ?= \"%s\" : %s\n", name1, name2);
+        fprintf(stderr, "CMP \"%s\" ?= \"%s\"\n", name1, name2);
         fprintf(stderr, "CMP \"%s\" ?= \"%s\" : %s\n", truncname1, truncname2,
                 retval ? "true" : "false");
     }
