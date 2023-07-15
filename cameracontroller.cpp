@@ -1871,7 +1871,7 @@ void sendPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData) {
     const bool localDebug = false;
     int pan_level = (int)(motionData->xAxisPosition * 24.9);
     int tilt_level = (int)(motionData->yAxisPosition * 23.9);
-    // fprintf(stderr, "VISCA MODE: %d, %d\n", pan_level, tilt_level);
+    fprintf(stderr, "VISCA MODE: %d, %d\n", pan_level, tilt_level);
 
     static int last_pan_level = 0;
     static int last_tilt_level = 0;
@@ -2210,7 +2210,7 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     }
 
     if (!enable_visca_ptz || !visca_running || g_visca_sock == -1) {
-        // fprintf(stderr, "NDI MODE: %f, %f\n", copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
+        fprintf(stderr, "NDI MODE: %f, %f\n", copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
         NDIlib_recv_ptz_pan_tilt_speed(pNDI_recv, copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
 
         if (enable_ptz_debugging) {
@@ -2286,7 +2286,9 @@ float readAxisPosition(int axis) {
 
 	// Cube the value to make it easier to move at lower speeds.
         value = pow(value, kPowerMultiplier);
-        if (rawValue < 0) value = -value;
+
+        // If kPowerMultiplier is even....
+        // if (rawValue < 0) value = -value;
 
         if (enable_ptz_debugging) {
             fprintf(stderr, "axis %d: raw: %d scaled: %f ", axis, rawValue, value);
