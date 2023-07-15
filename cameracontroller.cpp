@@ -3075,17 +3075,17 @@ void *runPWMThread(void *argIgnored) {
 float scaleAxisValue(int axis, int rawValue) {
   // In theory, the range is -2048 to 2048.  Unfortunately, analog
   // potentiometers aren't at all consistent about their centering
-  // so to avoid problems, treat everything from -200 to 200 as zero,
+  // so to avoid problems, treat everything from -300 to 300 as zero,
   // and everything from 1700 up as maximum speed.
 
-  double minThreshold = 200;
+  double minThreshold = 250;
   double maxThreshold = 1700;
   double powerMultiplier = 3.0;
 
   double sign = (rawValue > 0) ? 1 : -1;
 
   // Subtract off the minimum and clamp at zero.
-  double absRawValue = abs(rawValue) - 150;
+  double absRawValue = abs(rawValue) - minThreshold;
   if (absRawValue < 0) absRawValue = 0;
 
   // Divide by the range to scale from 0 to 1 (float).
