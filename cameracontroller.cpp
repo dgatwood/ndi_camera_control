@@ -115,6 +115,9 @@ int monitor_bytes_per_pixel = 4;
 bool monitor_flipped = false;  // Controlled by the -F flag.
 bool force_slow_path = false;  // For debugging.
 
+double recallSpeedNDI(void);
+int recallSpeedVISCA(void);
+
 #if __linux__
 // Always false in macOS.
 bool g_use_on_screen_lights = false;
@@ -1767,7 +1770,15 @@ void updateTallyLightsOverVISCA(int sock) {
     }
 }
 
+void sendVISCASetRecallSpeed(uint8_t speed, int sock) {
+    // uint8_t buf[7] = { 0x81, 0x01, 0x06, 0x01, speed, 0xFF };
+    // send_visca_packet(sock, buf, sizeof(buf), 100000);
+}
+
 void sendVISCALoadPreset(uint8_t presetNumber, int sock) {
+    int speed = recallSpeedVISCA();
+    sendVISCASetRecallSpeed(speed, sock);
+
     uint8_t buf[7] = { 0x81, 0x01, 0x04, 0x3F, 0x02, presetNumber, 0xFF };
     send_visca_packet(sock, buf, sizeof(buf), 100000);
 }
@@ -2220,7 +2231,7 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
         if (use_visca_for_presets) {
             sendVISCALoadPreset((uint8_t)copyOfMotionData.retrievePositionNumber, g_visca_sock);
         } else {
-            NDIlib_recv_ptz_recall_preset(pNDI_recv, copyOfMotionData.retrievePositionNumber, 1.0);  // As fast as possible.
+            NDIlib_recv_ptz_recall_preset(pNDI_recv, copyOfMotionData.retrievePositionNumber, recallSpeedNDI());
         }
     } else if (copyOfMotionData.storePositionNumber > 0 &&
                copyOfMotionData.storePositionNumber != lastMotionData.storePositionNumber) {
@@ -2232,6 +2243,17 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
         }
     }
     lastMotionData = copyOfMotionData;
+}
+
+// Return a value from 0 to 1.
+double recallSpeedNDI(void) {
+  // For now, return maximum possible speed.
+  return 1.0;
+}
+
+int recallSpeedVISCA(void) {
+  int value = (recallSpeedNDI() * 23.0) + 1.5;
+  return (value > 24) ? 24 : (value < 1) ? 1 : value;
 }
 
 #pragma mark - Button and joystick input
