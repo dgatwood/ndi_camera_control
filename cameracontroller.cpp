@@ -1716,7 +1716,7 @@ void updateVISCAMaxSpeed(int sock) {
     uint8_t buf[7] = { 0x81, 0x09, 0x04, 0x07, 0xFF };  // Custom max zoom speed command
     ssize_t responseLength = 0;
     uint8_t *responseBuf = send_visca_inquiry(sock, buf, sizeof(buf), 20000, &responseLength);
-    if (responseBuf && responseLength == 15 &&
+    if (responseBuf && responseLength == 13 &&
             responseBuf[1] == 0x50 && responseBuf[2] == 0xde &&
             responseBuf[3] == 0xad && responseBuf[4] == 0xbe &&
             responseBuf[5] == 0xef && responseBuf[6] == 0xfe &&
