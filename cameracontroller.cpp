@@ -1721,9 +1721,9 @@ void updateVISCAMaxSpeed(int sock) {
             responseBuf[3] == 0xad && responseBuf[4] == 0xbe &&
             responseBuf[5] == 0xef && responseBuf[6] == 0xfe &&
             responseBuf[7] == 0xed && responseBuf[8] == 0xba &&
-            responseBuf[9] == 0xbe && responseBuf[14] == 0xff) {
+            responseBuf[9] == 0xbe && responseBuf[12] == 0xff) {
         gMaxZoomValue = responseBuf[10] << 8 | responseBuf[11];
-        gMaxPanTiltValue = responseBuf[12] << 8 | responseBuf[13];
+        // gMaxPanTiltValue = responseBuf[12] << 8 | responseBuf[13];
         fprintf(stderr, "Max zoom value changed to %d\n", gMaxZoomValue);
     } else {
         fprintf(stderr, "Bad response %s for max zoom value (length %" PRId64 ").\n", // ssize_t
