@@ -5,8 +5,8 @@ UNAME := $(shell uname)
 
 ARCH := $(shell uname -p)
 
-USE_ROCKPI_PINOUTS=1
-USE_MRAA=1
+USE_ROCKPI_PINOUTS=0
+USE_MRAA=0
 
 ifeq ($(UNAME), Darwin)
 CXXFLAGS+=-I/usr/local/NDISDK/include/ -std=c++11 -stdlib=libc++ -ObjC++ -g -O0 -arch x86_64
