@@ -2474,7 +2474,7 @@ void updatePTZValues() {
 }
 
 void updateLights(motionData_t *motionData) {
-    static bool localDebug = false;
+    static bool localDebug = false || enable_button_debugging;
     static int blinkingButtons = 0;  // bitmap
     static int litButtons = 0;       // bitmap
     static int blinkCounter = 0;
@@ -3053,10 +3053,10 @@ void *runPWMThread(void *argIgnored) {
 float scaleAxisValue(int axis, int rawValue) {
   // In theory, the range is -2048 to 2048.  Unfortunately, analog
   // potentiometers aren't at all consistent about their centering
-  // so to avoid problems, treat everything from -150 to 150 as zero,
+  // so to avoid problems, treat everything from -200 to 200 as zero,
   // and everything from 1700 up as maximum speed.
 
-  double minThreshold = 150;
+  double minThreshold = 200;
   double maxThreshold = 1700;
   double powerMultiplier = 3.0;
 
