@@ -3078,7 +3078,7 @@ float scaleAxisValue(int axis, int rawValue) {
   // so to avoid problems, treat everything from -300 to 300 as zero,
   // and everything from 1700 up as maximum speed.
 
-  double minThreshold = 250;
+  double minThreshold = 300;
   double maxThreshold = 1700;
   double powerMultiplier = 3.0;
 
