@@ -23,12 +23,6 @@
 
 #include <Processing.NDI.Lib.h>
 
-/**
- * Cube the motion values to allow for more precise control at slower speeds.
- * Increase this constant if you find that slower speeds are unreachable.
- */
-const float kPowerMultiplier = 3.0;
-
 #define VISCA_ACK_TIMEOUT 100000  /* 100 msec */
 #define MIN_TALLY_INTERVAL 100000 /* 100 msec */
 #define PULSES_PER_BLINK 2
@@ -52,7 +46,7 @@ volatile uint8_t soft_pwm_value[MAX_PINS + 1];  // 1..40 for pins.
 mraa_gpio_context gpio_contexts[MAX_PINS + 1];  // 1..40 for pins.
 
 int set_PWM_dutycycle(__attribute__ ((unused)) int unused,
-		  unsigned gpioPin, unsigned dutyCycle);
+                  unsigned gpioPin, unsigned dutyCycle);
 int gpio_write(int pi, unsigned gpio, unsigned level);
 int set_mode(int pi, unsigned gpio, unsigned mode);
 
@@ -158,7 +152,7 @@ int gMaxPanTiltValue = 0;  // Default is normal VISCA commands.
 #pragma mark - Constants and types
 
 #define safe_asprintf(a, b...) { int retval = asprintf(a, b); \
-	                         assert(retval != -1); }
+                                 assert(retval != -1); }
 
 #ifdef __linux__
     #ifndef PAGE_SHIFT
@@ -244,6 +238,7 @@ receiver_array_item_t g_shown_sources = NULL;
 receiver_array_item_t g_active_receivers = NULL;
 
 void updateLights(motionData_t *motionData);
+float scaleAxisValue(int axis, int rawValue);
 
 struct timespec last_frame_time;
 
@@ -2270,30 +2265,10 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
  */
 float readAxisPosition(int axis) {
     #ifndef ENABLE_FILES_FOR_BUTTON_TESTING
-	if (!io_expander) return 0;
+        if (!io_expander) return 0;
         int pin = pinNumberForAxis(axis);
         int rawValue = input(io_expander, pin, 0.001) - 2048;
-
-        // rawValue is in the range -2048 to 2048
-	uint32_t absRawValue = abs(rawValue);
-	uint32_t minThreshold = 100;
-
-	// Center nulled value is now in the range 0 to 1948, with small values zeroed.
-        uint32_t centerNulledValue = absRawValue < minThreshold ? 0 : absRawValue - minThreshold;
-
-	// Value is in the range 0 to 1.
-        float value = rawValue / 1948.0;
-
-	// Cube the value to make it easier to move at lower speeds.
-        value = pow(value, kPowerMultiplier);
-
-        // If kPowerMultiplier is even....
-        // if (rawValue < 0) value = -value;
-
-        if (enable_ptz_debugging) {
-            fprintf(stderr, "axis %d: raw: %d scaled: %f ", axis, rawValue, value);
-        }
-        return value;
+        return scaleAxisValue(axis, rawValue);
     #else  // ENABLE_FILES_FOR_BUTTON_TESTING
         bool localDebug = false;
         char *filename;
@@ -2336,7 +2311,7 @@ float readAxisPosition(int axis) {
 bool debounce(int buttonNumber, bool value, motionData_t *motionData, int debounceCount);
 bool readButton(int buttonNumber, motionData_t *motionData) {
     #ifdef __linux__
-	if (!io_expander) return 0;
+        if (!io_expander) return 0;
         int pin = pinNumberForButton(buttonNumber);
         int rawValue = input(io_expander, pin, 0.001);
         bool value = (rawValue == LOW);  // If logic low (grounded), return true.
@@ -2473,9 +2448,19 @@ void updatePTZValues() {
     for (int i = 1; i <= MAX_BUTTONS; i++) {
         if (readButton(i, &newMotionData)) {
             if (newMotionData.setMode) {
+                if (enable_button_debugging) {
+                    fprintf(stderr, "Store position %d\n", i);
+                }
                 newMotionData.storePositionNumber = i;
             } else {
+                if (enable_button_debugging) {
+                    fprintf(stderr, "Retrieve position %d\n", i);
+                }
                 newMotionData.retrievePositionNumber = i;
+            }
+        } else {
+            if (enable_button_debugging) {
+                fprintf(stderr, "Inactive position %d\n", i);
             }
         }
     }
@@ -2489,12 +2474,13 @@ void updatePTZValues() {
 }
 
 void updateLights(motionData_t *motionData) {
+    static bool localDebug = false;
     static int blinkingButtons = 0;  // bitmap
     static int litButtons = 0;       // bitmap
     static int blinkCounter = 0;
     static bool holdAfterBlink = true;
 
-// fprintf(stderr, "Pos: %d\n", motionData->retrievePositionNumber);
+    if (localDebug) fprintf(stderr, "Pos: %d\n", motionData->retrievePositionNumber);
 
     const int setButtonMask = 0b00000001;
     const int mainButtonMask = 0b00111110;
@@ -2505,17 +2491,17 @@ void updateLights(motionData_t *motionData) {
         fabs(motionData->yAxisPosition) > 0 ||
         fabs(motionData->zoomPosition) > 0) {
             // Reset.
-            // fprintf(stderr, "LIGHTS: Motion\n");
+            if (localDebug) fprintf(stderr, "LIGHTS: Motion\n");
             litButtons &= ~mainButtonMask;
             holdAfterBlink = false;
     } else {
         if (motionData->retrievePositionNumber) {
-            // fprintf(stderr, "LIGHTS: Retrieve %d\n", motionData->retrievePositionNumber);
+            if (localDebug) fprintf(stderr, "LIGHTS: Retrieve %d\n", motionData->retrievePositionNumber);
             blinkCounter = 0;
             litButtons &= ~mainButtonMask;
             litButtons |= (1 << motionData->retrievePositionNumber);
         } else if (motionData->storePositionNumber > 0) {
-            // fprintf(stderr, "LIGHTS: Store %d\n", motionData->storePositionNumber);
+            if (localDebug) fprintf(stderr, "LIGHTS: Store %d\n", motionData->storePositionNumber);
             blinkingButtons |= 1 << motionData->storePositionNumber;
             blinkCounter = PULSES_PER_BLINK * 5;
         }
@@ -2523,7 +2509,7 @@ void updateLights(motionData_t *motionData) {
 
     if (blinkCounter) {
         blinkCounter--;
-        // fprintf(stderr, "LIGHTS: Blink: %d\n", blinkingButtons);
+        if (localDebug) fprintf(stderr, "LIGHTS: Blink: %d\n", blinkingButtons);
         if ((blinkCounter / PULSES_PER_BLINK) % 2 == 0) {
             litButtons |= blinkingButtons;
         } else {
@@ -2537,13 +2523,13 @@ void updateLights(motionData_t *motionData) {
     }
 
     const char *onoff[2] = { "OFF", "ON " };
-    /* fprintf(stderr, "White: %s Red: %s Yellow: %s Green: %s Blue: %s Black: %s\n",
+    if (localDebug) fprintf(stderr, "White: %s Red: %s Yellow: %s Green: %s Blue: %s Black: %s\n",
             onoff[(bool)(litButtons & 0b1)],
             onoff[(bool)(litButtons & 0b10)],
             onoff[(bool)(litButtons & 0b100)],
             onoff[(bool)(litButtons & 0b1000)],
             onoff[(bool)(litButtons & 0b10000)],
-            onoff[(bool)(litButtons & 0b100000)]); */
+            onoff[(bool)(litButtons & 0b100000)]);
 
 #if __linux__
     if (!g_use_on_screen_lights) {
@@ -2991,7 +2977,7 @@ void testDebounce(void) {
 
 // This leaks, so don't do it too much.
 int set_PWM_dutycycle(__attribute__ ((unused)) int unused,
-		  unsigned gpioPin, unsigned dutyCycle) {
+                  unsigned gpioPin, unsigned dutyCycle) {
   soft_pwm_value[gpioPin] = dutyCycle;
   soft_pwm_enabled[gpioPin] = true;
   return true;
@@ -3063,3 +3049,38 @@ void *runPWMThread(void *argIgnored) {
 }
 
 #endif
+
+float scaleAxisValue(int axis, int rawValue) {
+  // In theory, the range is -2048 to 2048.  Unfortunately, analog
+  // potentiometers aren't at all consistent about their centering
+  // so to avoid problems, treat everything from -150 to 150 as zero,
+  // and everything from 1700 up as maximum speed.
+
+  double minThreshold = 150;
+  double maxThreshold = 1700;
+  double powerMultiplier = 3.0;
+
+  double sign = (rawValue > 0) ? 1 : -1;
+
+  // Subtract off the minimum and clamp at zero.
+  double absRawValue = abs(rawValue) - 150;
+  if (absRawValue < 0) absRawValue = 0;
+
+  // Divide by the range to scale from 0 to 1 (float).
+  double value = absRawValue / (1.0 * maxThreshold - minThreshold);
+
+  if (value > 1.0) value = 1.0;
+
+  // Cube the value to make it easier to move at lower speeds.
+  value = pow(value, powerMultiplier);
+
+  // Always treat zero as positive.
+  if (value != 0.0) value *= sign;
+
+  if (enable_ptz_debugging) {
+      fprintf(stderr, "axis %d: raw: %d scaled: %f ", axis, rawValue, value);
+  }
+
+  return value;
+}
+
