@@ -149,6 +149,7 @@ bool enable_visca_ptz = false;
 bool visca_running = false;
 bool use_visca_for_presets = false;
 
+double gCurrentZoomPosition = 0;  // Only valid if VISCA is enabled.
 int gMaxZoomValue = 8;
 int gMaxPanTiltValue = 0;  // Default is normal VISCA commands.
 
@@ -1676,6 +1677,7 @@ int connectToVISCAPortWithAddress(const struct sockaddr *address) {
 
 void updateVISCAMaxSpeed(int sock);
 void updateTallyLightsOverVISCA(int sock);
+void updateZoomPositionOverVISCA(int sock);
 void sendZoomUpdatesOverVISCA(int sock, motionData_t *motionData);
 void sendPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData);
 void sendExposureCompensationOverVISCA(int sock);
@@ -1687,6 +1689,7 @@ void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
 #else
     updateVISCAMaxSpeed(g_visca_sock);
     updateTallyLightsOverVISCA(g_visca_sock);
+    updateZoomPositionOverVISCA(g_visca_sock);
     if (enable_visca_ptz) {
         sendZoomUpdatesOverVISCA(g_visca_sock, motionData);
         sendPanTiltUpdatesOverVISCA(g_visca_sock, motionData);
@@ -1711,7 +1714,8 @@ void updateVISCAMaxSpeed(int sock) {
 
     gettimeofday(&curTime, NULL);
 
-    // This should never change.
+    // This should never change, but we need to keep trying until we get a valid result, and it
+    // isn't worth stopping the polling after we do.
     if ((curTime.tv_sec - lastCheck.tv_sec) < 5) return;
 
     lastCheck = curTime;
@@ -1730,6 +1734,34 @@ void updateVISCAMaxSpeed(int sock) {
         fprintf(stderr, "Max zoom value changed to %d\n", gMaxZoomValue);
     } else {
         fprintf(stderr, "Bad response %s for max zoom value (length %" PRId64 ").\n", // ssize_t
+            fmtbuf(responseBuf, responseLength), (uint64_t)responseLength);
+    }
+}
+
+void updateZoomPositionOverVISCA(int sock) {
+    static struct timeval lastCheck = { 0, 0 };
+    struct timeval curTime;
+
+    gettimeofday(&curTime, NULL);
+
+    uint64_t difference = (curTime.tv_usec - lastCheck.tv_usec) +
+        ((curTime.tv_sec != lastCheck.tv_sec) ? 1000000 : 0);
+
+    if (difference < MIN_TALLY_INTERVAL) return;
+    lastCheck = curTime;
+
+    uint8_t buf[7] = { 0x81, 0x09, 0x04, 0x47, 0xFF };
+    ssize_t responseLength = 0;
+    uint8_t *responseBuf = send_visca_inquiry(sock, buf, sizeof(buf), 20000, &responseLength);
+    if (responseBuf && responseLength == 7 && responseBuf[1] == 0x50 && responseBuf[6] == 0xff) {
+        if (enable_verbose_debugging) {
+            fprintf(stderr, "Got zoom position data: %s\n", fmtbuf(responseBuf, responseLength));
+        }
+        int rawValue = ((responseBuf[2] & 0xf) << 12) | ((responseBuf[3] & 0xf) << 8) |
+            ((responseBuf[4] & 0xf) << 4) | (responseBuf[5] & 0xf);
+        gCurrentZoomPosition = (double)rawValue / (double)0xFFFF;
+    } else {
+        fprintf(stderr, "Bad response %s for max zoom value (length %" PRId64 ").\n",
             fmtbuf(responseBuf, responseLength), (uint64_t)responseLength);
     }
 }
@@ -3093,7 +3125,7 @@ float scaleAxisValue(int axis, int rawValue) {
 
   if (value > 1.0) value = 1.0;
 
-  // Cube the value to make it easier to move at lower speeds.
+  // Use a power computation to push the point of fast motion out towards the extremes.
   value = pow(value, powerMultiplier);
 
   // Always treat zero as positive.
@@ -3101,6 +3133,24 @@ float scaleAxisValue(int axis, int rawValue) {
 
   if (enable_ptz_debugging) {
       fprintf(stderr, "axis %d: raw: %d scaled: %f ", axis, rawValue, value);
+  }
+
+  // If VISCA is enabled, even if we're using NDI for PTZ control, we can still poll the zoom
+  // position and be smart about the pan and tilt speed.
+  if (enable_visca) {
+    // Range is 0 to 1, where 1 is zoomed all the way in, with 20x being about 0x4000, 30x about
+    // 0x6000, etc., or at least that seems to be the typical range.  After scaling, this is
+    // 0.25 for 20x and 0.375 for 30x.
+    //
+    // Based on this, a zoom position of 0 (zoomed out) has no effect, and a zoom position of
+    // 0.375 (30x) is capped at about 25% of normal speed.
+    //
+    // This also caps the minimum speed at 0.1x so that no matter how far in you zoom, you don't
+    // lose the ability to pan and tilt, and caps the maximum scale at 1.0 in case something is
+    // very, very wrong.
+    double scale = MIN(MAX(1 - (2 * gCurrentZoomPosition), 0.1), 1.0);
+    fprintf(stderr, "Current zoom position: %lf\nScale: %lf\n", gCurrentZoomPosition, scale);
+    value *= scale;
   }
 
   return value;
