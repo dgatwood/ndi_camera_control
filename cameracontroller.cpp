@@ -1752,6 +1752,9 @@ void updateZoomPositionOverVISCA(int sock) {
 
     uint8_t buf[7] = { 0x81, 0x09, 0x04, 0x47, 0xFF };
     ssize_t responseLength = 0;
+    if (enable_verbose_debugging) {
+        fprintf(stderr, "Getting zoom position.\n");
+    }
     uint8_t *responseBuf = send_visca_inquiry(sock, buf, sizeof(buf), 20000, &responseLength);
     if (responseBuf && responseLength == 7 && responseBuf[1] == 0x50 && responseBuf[6] == 0xff) {
         if (enable_verbose_debugging) {
@@ -1761,7 +1764,7 @@ void updateZoomPositionOverVISCA(int sock) {
             ((responseBuf[4] & 0xf) << 4) | (responseBuf[5] & 0xf);
         gCurrentZoomPosition = (double)rawValue / (double)0xFFFF;
     } else {
-        fprintf(stderr, "Bad response %s for max zoom value (length %" PRId64 ").\n",
+        fprintf(stderr, "Bad response %s for zoom position value (length %" PRId64 ").\n",
             fmtbuf(responseBuf, responseLength), (uint64_t)responseLength);
     }
 }
@@ -2160,6 +2163,7 @@ void send_visca_packet_raw(int sock, uint8_t *buf, ssize_t bufsize, int timeout_
 
 uint8_t *get_ack_data(int sock, int timeout_usec, ssize_t *len) {
     int udp_offset = g_visca_use_udp ? 8 : 0;
+    bool localDebug = false;
 
     static uint8_t buf[65535];
 
@@ -2174,14 +2178,17 @@ uint8_t *get_ack_data(int sock, int timeout_usec, ssize_t *len) {
     int retries = 3;  // Cap retries on Linux, because otherwise this causes
                       // hangs.  I have no idea why.
     do {
+        if (enable_verbose_debugging || localDebug) {
+            fprintf(stderr, "Retries: %d\n", retries);
+        }
         int first_sock = select(sock + 1, &readfds, NULL, NULL, &tv);
         if (first_sock > 0) {
-            if (enable_verbose_debugging) {
+            if (enable_verbose_debugging || localDebug) {
                 fprintf(stderr, "Calling recvfrom\n");
             }
             received_length = recvfrom(sock, buf, sizeof(buf),
                0, NULL, NULL);
-            if (enable_verbose_debugging) {
+            if (enable_verbose_debugging || localDebug) {
                 fprintf(stderr, "Done (len = %llu).\n", (unsigned long long)received_length);
             }
             break;
@@ -2190,7 +2197,7 @@ uint8_t *get_ack_data(int sock, int timeout_usec, ssize_t *len) {
             *len = 0;
             return NULL;
         } else {
-            if (enable_verbose_debugging) { fprintf(stderr, "EINTR\n"); }
+            if (enable_verbose_debugging || localDebug) { fprintf(stderr, "EINTR\n"); }
         }
     } while (!exit_app && retries-- > 0);
 
@@ -2248,7 +2255,9 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     }
 
     if (!enable_visca_ptz || !visca_running || g_visca_sock == -1) {
-        fprintf(stderr, "NDI MODE: %f, %f\n", copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
+        if (enable_verbose_debugging || enable_ptz_debugging) {
+            fprintf(stderr, "NDI MODE: %f, %f\n", copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
+        }
         NDIlib_recv_ptz_pan_tilt_speed(pNDI_recv, copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
 
         if (enable_ptz_debugging) {
@@ -3149,7 +3158,9 @@ float scaleAxisValue(int axis, int rawValue) {
     // lose the ability to pan and tilt, and caps the maximum scale at 1.0 in case something is
     // very, very wrong.
     double scale = MIN(MAX(1 - (2 * gCurrentZoomPosition), 0.1), 1.0);
-    fprintf(stderr, "Current zoom position: %lf\nScale: %lf\n", gCurrentZoomPosition, scale);
+    if (enable_verbose_debugging) {
+        fprintf(stderr, "Current zoom position: %lf\nScale: %lf\n", gCurrentZoomPosition, scale);
+    }
     value *= scale;
   }
 
