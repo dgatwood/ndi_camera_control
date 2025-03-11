@@ -392,7 +392,7 @@ void free_receiver_item(receiver_array_item_t receiver_item);
 void *runNDIRunLoop(void *receiver_thread_data_ref);
 char *fmtbuf(uint8_t *buf, ssize_t size);
 void drawOnScreenLights(unsigned char *framebuffer_base, int xres, int yres, int bytes_per_pixel);
-void drawOnScreenStats(unsigned char *framebuffer_base, int xres, int yres, int bytes_per_pixel);
+void drawOnScreenStats(void);
 
 bool connectVISCA(char *stream_name, const char *context);
 void sendVISCALoadPreset(uint8_t presetNumber, int sock);
@@ -1068,7 +1068,6 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
 
             bcopy(video_recv->p_data, tempBuf, screenSize);
             drawOnScreenLights(tempBuf, g_framebufferXRes, g_framebufferYRes, monitor_bytes_per_pixel);
-            drawOnScreenStats(tempBuf, g_framebufferXRes, g_framebufferYRes, monitor_bytes_per_pixel);
         } else {
             if (enable_verbose_debugging) {
                 fprintf(stderr, "slowpath (%f / %f)\n", g_xScaleFactor, g_yScaleFactor);
@@ -1104,7 +1103,6 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
                 }
             }
             drawOnScreenLights(tempBuf, g_framebufferXRes, g_framebufferYRes, monitor_bytes_per_pixel);
-            drawOnScreenStats(tempBuf, g_framebufferXRes, g_framebufferYRes, monitor_bytes_per_pixel);
         }
 
         int zero = 0;
@@ -1112,6 +1110,7 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
             if (enable_debugging) perror("cameracontroller:  FBIO_WAITFORVSYNC");
         }
         bcopy(tempBuf, g_framebufferBase, screenSize);
+        drawOnScreenStats();
 
         return true;
     }
@@ -1159,7 +1158,6 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
             bcopy(video_recv->p_data, datacopy, bufsize);
 
             drawOnScreenLights(datacopy, video_recv->xres, video_recv->yres, 4);
-            drawOnScreenStats(datacopy, video_recv->xres, video_recv->yres, 4);
 
             CGContextRef bitmapBuffer = CGBitmapContextCreateWithData(datacopy, video_recv->xres, video_recv->yres,
                                                                       8, (video_recv->xres * 4), CGColorSpaceCreateDeviceRGB(),
@@ -1184,7 +1182,7 @@ enum onScreenColor {
     onScreenLightColorWhite = 7
 };
 
-void drawOnScreenStats(unsigned char *framebuffer_base, int xres, int yres, int bytes_per_pixel) {
+void drawOnScreenStats(void) {
 
 #ifdef USE_TFBLIB
   motionData_t motionData = getMotionData();
