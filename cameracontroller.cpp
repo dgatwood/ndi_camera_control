@@ -1187,14 +1187,17 @@ void drawOnScreenStats(void) {
 #ifdef USE_TFBLIB
   motionData_t motionData = getMotionData();
   char *string = NULL;
-  asprintf(&string, "X: %3.3f  Y: %3.3f  Z: %3.3f\nB0: %c B1: %c B2: %c B3: %c B4: %c B5: %c",
-    motionData.xAxisPosition, motionData.yAxisPosition, motionData.zoomPosition,
+  char *string2 = NULL;
+  asprintf(&string, "X: %3.3f  Y: %3.3f  Z: %3.3f",
+    motionData.xAxisPosition, motionData.yAxisPosition, motionData.zoomPosition);
+  asprintf(&string2, "B0: %c B1: %c B2: %c B3: %c B4: %c B5: %c",
     BOOLSTR(motionData.currentValue[0]), BOOLSTR(motionData.currentValue[1]),
     BOOLSTR(motionData.currentValue[2]), BOOLSTR(motionData.currentValue[3]),
     BOOLSTR(motionData.currentValue[4]), BOOLSTR(motionData.currentValue[5]));
 
   tfb_set_font_by_size(16, 32);
   tfb_draw_string(10, 10, tfb_white, tfb_black, string);
+  tfb_draw_string(10, 42, tfb_white, tfb_black, string2);
 #endif
 }
 
