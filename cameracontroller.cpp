@@ -21,7 +21,16 @@
 
 #include <pthread.h>
 
+extern "C" {
+#ifdef USE_TFBLIB
+#include "tfblib/include/tfblib/tfb_colors.h"
+#include "tfblib/include/tfblib/tfblib.h"
+#endif
+}
+
 #include <Processing.NDI.Lib.h>
+
+#define BOOLSTR(boolval) (boolval ? 'Y' : 'N')
 
 #define VISCA_ACK_TIMEOUT 100000  /* 100 msec */
 #define MIN_TALLY_INTERVAL 100000 /* 100 msec */
@@ -383,6 +392,7 @@ void free_receiver_item(receiver_array_item_t receiver_item);
 void *runNDIRunLoop(void *receiver_thread_data_ref);
 char *fmtbuf(uint8_t *buf, ssize_t size);
 void drawOnScreenLights(unsigned char *framebuffer_base, int xres, int yres, int bytes_per_pixel);
+void drawOnScreenStats(unsigned char *framebuffer_base, int xres, int yres, int bytes_per_pixel);
 
 bool connectVISCA(char *stream_name, const char *context);
 void sendVISCALoadPreset(uint8_t presetNumber, int sock);
@@ -411,6 +421,14 @@ int connectToVISCAPortWithAddress(const struct sockaddr *address);
 
 int main(int argc, char *argv[]) {
     runUnitTests();
+
+#ifdef USE_TFBLIB
+   int rc = 0;
+   if ((rc = tfb_acquire_fb(0, "/dev/fb0", "/dev/tty6")) != TFB_SUCCESS) {
+      fprintf(stderr, "tfb_acquire_fb() failed with error code: %d\n", rc);
+      return 1;
+   }
+#endif
 
 #ifdef USE_MRAA
     pthread_t newSoftPWMThread;
@@ -1050,6 +1068,7 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
 
             bcopy(video_recv->p_data, tempBuf, screenSize);
             drawOnScreenLights(tempBuf, g_framebufferXRes, g_framebufferYRes, monitor_bytes_per_pixel);
+            drawOnScreenStats(tempBuf, g_framebufferXRes, g_framebufferYRes, monitor_bytes_per_pixel);
         } else {
             if (enable_verbose_debugging) {
                 fprintf(stderr, "slowpath (%f / %f)\n", g_xScaleFactor, g_yScaleFactor);
@@ -1085,6 +1104,7 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
                 }
             }
             drawOnScreenLights(tempBuf, g_framebufferXRes, g_framebufferYRes, monitor_bytes_per_pixel);
+            drawOnScreenStats(tempBuf, g_framebufferXRes, g_framebufferYRes, monitor_bytes_per_pixel);
         }
 
         int zero = 0;
@@ -1139,6 +1159,7 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
             bcopy(video_recv->p_data, datacopy, bufsize);
 
             drawOnScreenLights(datacopy, video_recv->xres, video_recv->yres, 4);
+            drawOnScreenStats(datacopy, video_recv->xres, video_recv->yres, 4);
 
             CGContextRef bitmapBuffer = CGBitmapContextCreateWithData(datacopy, video_recv->xres, video_recv->yres,
                                                                       8, (video_recv->xres * 4), CGColorSpaceCreateDeviceRGB(),
@@ -1162,6 +1183,22 @@ enum onScreenColor {
     onScreenLightColorBlue = 4,
     onScreenLightColorWhite = 7
 };
+
+void drawOnScreenStats(unsigned char *framebuffer_base, int xres, int yres, int bytes_per_pixel) {
+
+#ifdef USE_TFBLIB
+  motionData_t motionData = getMotionData();
+  char *string = NULL;
+  asprintf(&string, "X: %3.3f  Y: %3.3f  Z: %3.3f\nB0: %c B1: %c B2: %c B3: %c B4: %c B5: %c",
+    motionData.xAxisPosition, motionData.yAxisPosition, motionData.zoomPosition,
+    BOOLSTR(motionData.currentValue[0]), BOOLSTR(motionData.currentValue[1]),
+    BOOLSTR(motionData.currentValue[2]), BOOLSTR(motionData.currentValue[3]),
+    BOOLSTR(motionData.currentValue[4]), BOOLSTR(motionData.currentValue[5]));
+
+  tfb_set_font_by_size(16, 32);
+  tfb_draw_string(10, 10, tfb_white, tfb_black, string);
+#endif
+}
 
 void drawOnScreenLight(unsigned char *framebuffer_base, int xres, int bytes_per_pixel,
                        int min_x, int max_x, int min_y, int max_y, enum onScreenColor color);
@@ -1750,7 +1787,8 @@ void updateZoomPositionOverVISCA(int sock) {
     if (difference < MIN_TALLY_INTERVAL) return;
     lastCheck = curTime;
 
-    uint8_t buf[7] = { 0x81, 0x09, 0x04, 0x47, 0xFF };
+    uint8_t buf[5] = { 0x81, 0x09, 0x04, 0x47, 0xFF };
+
     ssize_t responseLength = 0;
     if (enable_verbose_debugging) {
         fprintf(stderr, "Getting zoom position.\n");
@@ -2905,13 +2943,17 @@ char *fmtbuf(uint8_t *buf, ssize_t bufsize) {
         free(retval);
         retval = NULL;
     }
-    retval = (char *)malloc(bufsize * 3);
-    for (ssize_t i = 0 ; i < bufsize; i++) {
-        retval[i * 3] = fmtnibble(buf[i] >> 4);
-        retval[(i * 3) + 1] = fmtnibble(buf[i] & 0xf);
-        retval[(i * 3) + 2] = ' ';
+    retval = (char *)malloc(MAX(1, (bufsize * 3)));
+    if (bufsize) {
+        for (ssize_t i = 0 ; i < bufsize; i++) {
+            retval[i * 3] = fmtnibble(buf[i] >> 4);
+            retval[(i * 3) + 1] = fmtnibble(buf[i] & 0xf);
+            retval[(i * 3) + 2] = ' ';
+        }
+        retval[(bufsize * 3) - 1] = '\0';
+    } else {
+        retval[0] = '\0';
     }
-    retval[(bufsize * 3) - 1] = '\0';
     return retval;
 }
 

@@ -5,13 +5,14 @@ UNAME := $(shell uname)
 
 ARCH := $(shell uname -p)
 
-USE_ROCKPI_PINOUTS=1
-USE_MRAA=1
+USE_TFBLIB=1
+USE_ROCKPI_PINOUTS=0
+USE_MRAA=0
 
 ifeq ($(UNAME), Darwin)
 CXXFLAGS+=-I/usr/local/NDISDK/include/ -std=c++11 -stdlib=libc++ -ObjC++ -g -O0 -arch x86_64
 LDFLAGS+=-L/usr/local/NDISDK/lib/x64/ -lndi -framework CoreFoundation -framework AppKit -arch x86_64
-endif
+endif  # Darwin
 
 ifeq ($(UNAME), Linux)
 CXXFLAGS+=-I/usr/local/NDISDK/include/ -g -O3
@@ -19,52 +20,61 @@ LDFLAGS+=-lndi -ldl -lpthread -lavahi-client -lavahi-common
 
 ifeq ($(ARCH), unknown)
 ARCH := $(shell uname -m)
-endif
+endif  # Unknown arch
 
 ifeq ($(ARCH), aarch64)
 LDFLAGS+=-L/usr/local/NDISDK/lib/aarch64-rpi4-linux-gnueabi
-endif
+endif  # ARM64
 
 ifeq ($(ARCH), arm)
 ifeq (,$(wildcard /usr/local/NDISDK/lib/arm-rpi4-linux-gnueabihf))
 LDFLAGS+=-L/usr/local/NDISDK/lib/arm-rpi3-linux-gnueabihf/
 else
 LDFLAGS+=-L/usr/local/NDISDK/lib/arm-rpi4-linux-gnueabihf
-endif
-endif
+endif  # Pi 3/4
+endif  # ARM
 
 ifeq ($(ARCH), armv7l)
 ifeq (,$(wildcard /usr/local/NDISDK/lib/arm-rpi4-linux-gnueabihf))
 LDFLAGS+=-L/usr/local/NDISDK/lib/arm-rpi3-linux-gnueabihf/
 else
 LDFLAGS+=-L/usr/local/NDISDK/lib/arm-rpi4-linux-gnueabihf
-endif
-endif
+endif  # Pi 4
+endif  # ARMv7l
 
 ifeq ($(ARCH), i686)
 LDFLAGS+=-L/usr/local/NDISDK/lib/i686-linux-gnu
-endif
+endif  # Arch i686
 
 ifeq ($(ARCH), x86_64)
 LDFLAGS+=-L/usr/local/NDISDK/lib/x86_64-linux-gnu
-endif
+endif  # Arch x86-64
 
 ifeq ($(USE_ROCKPI_PINOUTS), 1)
 CXXFLAGS+=-DUSE_ROCKPI_PINOUTS
-endif
+endif  # RockPi
 
 ifeq ($(USE_MRAA), 1)
 CXXFLAGS+=-DUSE_MRAA
 LDFLAGS+=-lmraa
 else
 LDFLAGS+=-lpigpiod_if2
+endif  # MRAA
+
+ifeq ($(USE_TFBLIB), 1)
+CXXFLAGS+=-DUSE_TFBLIB
+LDFLAGS+=-ltfb -L./tfblib/build/
+else
+LDFLAGS+=-lpigpiod_if2
 endif
 
-endif
-
+endif  # Linux
 
 cameracontroller: cameracontroller.cpp LEDConfiguration.h
 	${CXX} -std=c++11 cameracontroller.cpp -o cameracontroller ${CXXFLAGS} ${LDFLAGS}
 
 libmpv:
 	cd mpv && ./bootstrap.py  && ./waf configure --enable-libmpv-static --enable-lgpl && ./waf build
+
+libtfb:
+	cd tfblib && mkdir build && cd build && cmake ../ && make
