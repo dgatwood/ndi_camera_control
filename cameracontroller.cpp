@@ -33,7 +33,7 @@ extern "C" {
 #define BOOLSTR(boolval) (boolval ? 'Y' : 'N')
 
 #define VISCA_ACK_TIMEOUT 100000  /* 100 msec */
-#define MIN_TALLY_INTERVAL 100000 /* 100 msec */
+#define MIN_TALLY_INTERVAL 10000 /* 10 msec */
 #define PULSES_PER_BLINK 2
 
 // Playing with P2 protocol.  Will delete later.
@@ -158,6 +158,8 @@ bool enable_visca_ptz = false;
 bool visca_running = false;
 bool use_visca_for_presets = false;
 
+double gCurrentPanPosition = 0;   // Only valid if VISCA is enabled.
+double gCurrentTiltPosition = 0;  // Only valid if VISCA is enabled.
 double gCurrentZoomPosition = 0;  // Only valid if VISCA is enabled.
 int gMaxZoomValue = 8;
 int gMaxPanTiltValue = 0;  // Default is normal VISCA commands.
@@ -274,6 +276,14 @@ int8_t g_manual_shutter = 0;
 bool g_camera_active = false;
 bool g_camera_preview = false;
 bool g_camera_malfunctioning = false;
+
+static bool g_fudge_pan = false;
+static bool g_fudge_tilt = false;
+static bool g_fudge_zoom = false;
+
+static int g_last_zoom_level = 0;
+static int g_last_pan_level = 0;
+static int g_last_tilt_level = 0;
 
 
 // Specs are for Marshall cameras.  Other cameras may differ.
@@ -1188,8 +1198,9 @@ void drawOnScreenStats(void) {
   motionData_t motionData = getMotionData();
   char *string = NULL;
   char *string2 = NULL;
-  asprintf(&string, "X: %3.3f  Y: %3.3f  Z: %3.3f",
-    motionData.xAxisPosition, motionData.yAxisPosition, motionData.zoomPosition);
+  asprintf(&string, "X: %3.3f XV: %02d Y: %3.3f XV: %02d Z: %3.3f XV: %02d",
+    motionData.xAxisPosition, g_last_pan_level, motionData.yAxisPosition,
+    g_last_tilt_level, motionData.zoomPosition, g_last_zoom_level);
   asprintf(&string2, "B0: %c B1: %c B2: %c B3: %c B4: %c B5: %c",
     BOOLSTR(motionData.currentValue[0]), BOOLSTR(motionData.currentValue[1]),
     BOOLSTR(motionData.currentValue[2]), BOOLSTR(motionData.currentValue[3]),
@@ -1776,9 +1787,114 @@ void updateVISCAMaxSpeed(int sock) {
     }
 }
 
+void updatePanTiltPositionOverVISCA(int sock) {
+    static struct timeval lastCheck = { 0, 0 };
+    struct timeval curTime;
+
+    static double lastPanPosition = 0;
+    static double lastTiltPosition = 0;
+    static int panMessageFailCount = 0;
+    static int tiltMessageFailCount = 0;
+    static int panMessageSuccessCount = 0;
+    static int tiltMessageSuccessCount = 0;
+    static bool isSet = false;
+
+    static int minSuccessToIgnore = 1000000 / MIN_TALLY_INTERVAL;  // One second.
+    static int minFailureToIgnore = 50000 / MIN_TALLY_INTERVAL;  // 50 ms.
+
+    gettimeofday(&curTime, NULL);
+
+    uint64_t difference = (curTime.tv_usec - lastCheck.tv_usec) +
+        ((curTime.tv_sec != lastCheck.tv_sec) ? 1000000 : 0);
+
+    if (difference < MIN_TALLY_INTERVAL) return;
+    lastCheck = curTime;
+
+    uint8_t buf[5] = { 0x81, 0x09, 0x06, 0x12, 0xFF };
+
+    ssize_t responseLength = 0;
+    if (enable_verbose_debugging) {
+        fprintf(stderr, "Getting zoom position.\n");
+    }
+    uint8_t *responseBuf = send_visca_inquiry(sock, buf, sizeof(buf), 20000, &responseLength);
+    if (responseBuf && responseLength == 11 && responseBuf[1] == 0x50 && responseBuf[3] == 0xff) {
+        if (enable_verbose_debugging) {
+            fprintf(stderr, "Got zoom position data: %s\n", fmtbuf(responseBuf, responseLength));
+        }
+        int rawPanValue = ((responseBuf[2] & 0xf) << 12) | ((responseBuf[3] & 0xf) << 8) |
+            ((responseBuf[4] & 0xf) << 4) | (responseBuf[5] & 0xf);
+        int rawTiltValue = ((responseBuf[6] & 0xf) << 12) | ((responseBuf[7] & 0xf) << 8) |
+            ((responseBuf[8] & 0xf) << 4) | (responseBuf[9] & 0xf);
+        gCurrentPanPosition = (double)rawPanValue / (double)0xFFFF;
+        gCurrentTiltPosition = (double)rawTiltValue / (double)0xFFFF;
+    } else {
+        fprintf(stderr, "Bad response %s for zoom position value (length %" PRId64 ").\n",
+            fmtbuf(responseBuf, responseLength), (uint64_t)responseLength);
+    }
+    if (!isSet) {
+        isSet = true;
+    } else { 
+        if (g_last_pan_level == 0 && lastPanPosition != gCurrentPanPosition) {
+            // If the camera should not be moving, but is, increment the
+            // failure count.
+            panMessageFailCount++;
+            panMessageSuccessCount = 0;
+        } else if (g_last_pan_level == 0) {
+            // If the camera is not supposed to be moving and is not, increment
+            // The success count.  If it gets high enough (no motion in one
+            // second), ignore previous failures.
+            if (panMessageSuccessCount++ > minSuccessToIgnore) {
+                panMessageSuccessCount = 0;
+            }
+        } else {
+            // If the camera is supposed to be moving, don't check at all.
+            panMessageSuccessCount = 0;
+            panMessageFailCount = 0;
+        }
+        if (panMessageFailCount >= minFailureToIgnore) {
+            fprintf(stderr, "@@@ WARNING: FUDGING PAN BECAUSE CAMERA DID NOT STOP");
+            g_fudge_pan = true;
+        }
+
+        if (g_last_tilt_level == 0 && lastTiltPosition != gCurrentTiltPosition) {
+            // If the camera should not be moving, but is, increment the
+            // failure count.
+            tiltMessageFailCount++;
+            tiltMessageSuccessCount = 0;
+        } else if (g_last_tilt_level == 0) {
+            // If the camera is not supposed to be moving and is not, increment
+            // The success count.  If it gets high enough (no motion in one
+            // second), ignore previous failures.
+            if (tiltMessageSuccessCount++ > minSuccessToIgnore) {
+                tiltMessageSuccessCount = 0;
+            }
+        } else {
+            // If the camera is supposed to be moving, don't check at all.
+            tiltMessageSuccessCount = 0;
+            tiltMessageFailCount = 0;
+        }
+        if (panMessageFailCount >= minFailureToIgnore) {
+            fprintf(stderr, "@@@ WARNING: FUDGING TILT BECAUSE CAMERA DID NOT STOP");
+            g_fudge_tilt = true;
+        }
+
+        lastPanPosition = gCurrentPanPosition;
+        lastTiltPosition = gCurrentTiltPosition;
+    }
+}
+
 void updateZoomPositionOverVISCA(int sock) {
     static struct timeval lastCheck = { 0, 0 };
     struct timeval curTime;
+
+    static double lastZoomPosition = 0;
+    static int zoomMessageFailCount = 0;
+    static int zoomMessageSuccessCount = 0;
+    static bool isSet = false;
+
+    static int minSuccessToIgnore = 1000000 / MIN_TALLY_INTERVAL;  // One second.
+    static int minFailureToIgnore = 50000 / MIN_TALLY_INTERVAL;  // 50 ms.
+
 
     gettimeofday(&curTime, NULL);
 
@@ -1805,6 +1921,33 @@ void updateZoomPositionOverVISCA(int sock) {
     } else {
         fprintf(stderr, "Bad response %s for zoom position value (length %" PRId64 ").\n",
             fmtbuf(responseBuf, responseLength), (uint64_t)responseLength);
+    }
+    if (!isSet) {
+        isSet = true;
+    } else { 
+        if (g_last_zoom_level == 0 && lastZoomPosition != gCurrentZoomPosition) {
+            // If the camera should not be moving, but is, increment the
+            // failure count.
+            zoomMessageFailCount++;
+            zoomMessageSuccessCount = 0;
+        } else if (g_last_zoom_level == 0) {
+            // If the camera is not supposed to be moving and is not, increment
+            // The success count.  If it gets high enough (no motion in one
+            // second), ignore previous failures.
+            if (zoomMessageSuccessCount++ > minSuccessToIgnore) {
+                zoomMessageSuccessCount = 0;
+            }
+        } else {
+            // If the camera is supposed to be moving, don't check at all.
+            zoomMessageSuccessCount = 0;
+            zoomMessageFailCount = 0;
+        }
+        if (zoomMessageFailCount >= minFailureToIgnore) {
+            fprintf(stderr, "@@@ WARNING: FUDGING ZOOM BECAUSE CAMERA DID NOT STOP");
+            g_fudge_zoom = true;
+        }
+
+        lastZoomPosition = gCurrentZoomPosition;
     }
 }
 
@@ -1904,12 +2047,13 @@ void sendZoomUpdatesOverVISCA(int sock, motionData_t *motionData) {
         // Use a nonstandard VISCA command with a much larger zoom speed range.
         uint8_t buf[8] = { 0x81, 0x01, 0x04, 0x07, 0x00, 0x00, 0x00, 0xFF };
         int level = (int)(motionData->zoomPosition * (gMaxZoomValue + 0.9));
-        static int last_zoom_level = 0;
 
-        if (level == last_zoom_level) {
+        static int count = 0;
+
+        if (level == g_last_zoom_level) {
             return;
         }
-        last_zoom_level = level;
+        g_last_zoom_level = level;
 
         buf[4] = (level < 0) ? 0x2f : 0x3f;
         buf[5] = (abs(level) >> 8) & 0xff;
@@ -1924,12 +2068,28 @@ void sendZoomUpdatesOverVISCA(int sock, motionData_t *motionData) {
         uint8_t buf[6] = { 0x81, 0x01, 0x04, 0x07, 0x00, 0xFF };
         int level = (int)(motionData->zoomPosition * (8.9));
 
-        static int last_zoom_level = 0;
+        // Certain major-brand PTZ cameras have a defect where they sometimes
+        // lose VISCA commands and think that they have changed the speed when
+        // they actually have not.  If the camera is still moving and should be
+        // stopped, send a single nonzero motion command and then immediately
+        // send a stop command again to work around the bug.
+        //
+        // Bizarrely, even though this behavior was trivally 100% reproducible
+        // before adding this code just by panning for a fraction of a second
+        // a few times in a row, the act of adding this workaround code seems
+        // to have completely stopped the bug from reproducing.  So it is
+        // possible that the act of querying the pan, tilt, and zoom levels a
+        // hundred times per second is actually *preventing* the bug from
+        // occurring.  Weird.
+        if (g_fudge_zoom) {
+            g_fudge_zoom = false;
+            level = (level <= 0) ? level + 1 : level - 1;
+        }
 
-        if (level == last_zoom_level) {
+        if (level == g_last_zoom_level) {
             return;
         }
-        last_zoom_level = level;
+        g_last_zoom_level = level;
 
         if (level != 0) {
             buf[4] = (abs(level) - 1) | (level < 0 ? 0x20 : 0x30);
@@ -1951,16 +2111,27 @@ void sendPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData) {
     const bool localDebug = false;
     int pan_level = (int)(motionData->xAxisPosition * 24.9);
     int tilt_level = (int)(motionData->yAxisPosition * 23.9);
-    fprintf(stderr, "VISCA MODE: %d, %d\n", pan_level, tilt_level);
+    // fprintf(stderr, "VISCA MODE: %d, %d\n", pan_level, tilt_level);
 
-    static int last_pan_level = 0;
-    static int last_tilt_level = 0;
+    // Certain major-brand PTZ cameras have a defect where they sometimes
+    // lose VISCA commands and think that they have changed the speed when
+    // they actually have not.  If the camera is still moving and should be
+    // stopped, send a single nonzero motion command and then immediately
+    // send a stop command again to work around the bug.
+    if (g_fudge_pan) {
+        g_fudge_pan = false;
+        pan_level = (pan_level <= 0) ? pan_level + 1 : pan_level - 1;
+    }
+    if (g_fudge_tilt) {
+        g_fudge_tilt = false;
+        tilt_level = (tilt_level <= 0) ? tilt_level + 1 : tilt_level - 1;
+    }
 
-    if (pan_level == last_pan_level && tilt_level == last_tilt_level) {
+    if (pan_level == g_last_pan_level && tilt_level == g_last_tilt_level) {
         return;
     }
-    last_pan_level = pan_level;
-    last_tilt_level = tilt_level;
+    g_last_pan_level = pan_level;
+    g_last_tilt_level = tilt_level;
 
     bool left = pan_level > 0;
     bool right = pan_level < 0;
@@ -1993,14 +2164,16 @@ void sendExtendedPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData) {
     int pan_level = (int)(motionData->xAxisPosition * (gMaxPanTiltValue + 0.9));
     int tilt_level = (int)(motionData->yAxisPosition * (gMaxPanTiltValue + 0.9));
 
-    static int last_pan_level = 0;
-    static int last_tilt_level = 0;
+    static int g_last_pan_level = 0;
+    static int g_last_tilt_level = 0;
 
-    if (pan_level == last_pan_level && tilt_level == last_tilt_level) {
+    static int count = 0;
+
+    if (pan_level == g_last_pan_level && tilt_level == g_last_tilt_level) {
         return;
     }
-    last_pan_level = pan_level;
-    last_tilt_level = tilt_level;
+    g_last_pan_level = pan_level;
+    g_last_tilt_level = tilt_level;
 
     bool left = pan_level > 0;
     bool right = pan_level < 0;

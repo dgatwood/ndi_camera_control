@@ -64,17 +64,22 @@ endif  # MRAA
 ifeq ($(USE_TFBLIB), 1)
 CXXFLAGS+=-DUSE_TFBLIB
 LDFLAGS+=-ltfb -L./tfblib/build/
+DEPS=libtfb
 else
 LDFLAGS+=-lpigpiod_if2
+DEPS=
 endif
 
 endif  # Linux
 
-cameracontroller: cameracontroller.cpp LEDConfiguration.h
+cameracontroller: cameracontroller.cpp LEDConfiguration.h ${DEPS}
 	${CXX} -std=c++11 cameracontroller.cpp -o cameracontroller ${CXXFLAGS} ${LDFLAGS}
 
 libmpv:
 	cd mpv && ./bootstrap.py  && ./waf configure --enable-libmpv-static --enable-lgpl && ./waf build
 
 libtfb:
-	cd tfblib && mkdir build && cd build && cmake ../ && make
+	cd tfblib && mkdir -p build && cd build && cmake ../ && make
+
+libtfb_clone:
+	git clone https://github.com/vvaltchev/tfblib.git
