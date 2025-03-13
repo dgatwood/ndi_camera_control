@@ -654,7 +654,7 @@ int main(int argc, char *argv[]) {
 #ifdef __linux__
 #ifndef DEMO_MODE
 fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
-    io_expander = newIOExpander(PIMORONI_I2C_FILENAME, I2C_ADDRESS, 0, -1, 0, false);
+    io_expander = newIOExpander(PIMORONI_I2C_FILENAME, I2C_ADDRESS, 5.0, -1, 0, false);
     if (io_expander) {
         for (int pin = kPTZAxisX; pin <= kPTZAxisZoom; pin++) {
             ioe_set_mode(io_expander, pinNumberForAxis(pin), PIN_MODE_ADC, false, false);
