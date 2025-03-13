@@ -1921,6 +1921,7 @@ void updateZoomPositionOverVISCA(int sock) {
     } else {
         fprintf(stderr, "Bad response %s for zoom position value (length %" PRId64 ").\n",
             fmtbuf(responseBuf, responseLength), (uint64_t)responseLength);
+        return;
     }
     if (!isSet) {
         isSet = true;
