@@ -1828,7 +1828,7 @@ void updatePanTiltPositionOverVISCA(int sock) {
         gCurrentPanPosition = (double)rawPanValue / (double)0xFFFF;
         gCurrentTiltPosition = (double)rawTiltValue / (double)0xFFFF;
     } else {
-        fprintf(stderr, "Bad response %s for zoom position value (length %" PRId64 ").\n",
+        fprintf(stderr, "Bad response %s for pan/tilt position value (length %" PRId64 ").\n",
             fmtbuf(responseBuf, responseLength), (uint64_t)responseLength);
     }
     if (!isSet) {
