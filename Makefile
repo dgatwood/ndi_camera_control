@@ -66,7 +66,6 @@ CXXFLAGS+=-DUSE_TFBLIB
 LDFLAGS+=-ltfb -L./tfblib/build/
 DEPS=libtfb
 else
-LDFLAGS+=-lpigpiod_if2
 DEPS=
 endif
 
