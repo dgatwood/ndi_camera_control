@@ -3,6 +3,9 @@
 # even on arm, so force our binaries to also use that architecture.  Ugh.
 UNAME := $(shell uname)
 
+CC=clang
+CXX=clang++
+
 ARCH := $(shell uname -p)
 
 USE_TFBLIB=1
@@ -15,8 +18,10 @@ LDFLAGS+=-L/usr/local/NDISDK/lib/x64/ -lndi -framework CoreFoundation -framework
 endif  # Darwin
 
 ifeq ($(UNAME), Linux)
-CXXFLAGS+=-I/usr/local/NDISDK/include/ -g -O3
-LDFLAGS+=-lndi -ldl -lpthread -lavahi-client -lavahi-common
+CFLAGS+=-fblocks
+CXXFLAGS+=-I/usr/local/NDISDK/include/ -g -O0 -fblocks
+LDFLAGS+=-lndi -ldl -lpthread -lavahi-client -lavahi-common -lobjc -lBlocksRuntime
+# -I/usr/include/GNUstep -lgnustep-gui
 
 ifeq ($(ARCH), unknown)
 ARCH := $(shell uname -m)
@@ -71,8 +76,8 @@ endif
 
 endif  # Linux
 
-cameracontroller: cameracontroller.cpp LEDConfiguration.h ${DEPS}
-	${CXX} -std=c++11 cameracontroller.cpp -o cameracontroller ${CXXFLAGS} ${LDFLAGS}
+cameracontroller: cameracontroller.mm LEDConfiguration.h ${DEPS}
+	${CXX} -std=c++11 cameracontroller.mm -o cameracontroller ${CXXFLAGS} ${LDFLAGS}
 
 libmpv:
 	cd mpv && ./bootstrap.py  && ./waf configure --enable-libmpv-static --enable-lgpl && ./waf build
@@ -82,3 +87,15 @@ libtfb:
 
 libtfb_clone:
 	git clone https://github.com/vvaltchev/tfblib.git
+
+install_support:
+	sudo apt install clang gnustep gnustep-devel libblocksruntime-dev
+	git clone https://github.com/gnustep/libobjc2.git
+	# cd libobjc2
+	# CC=clang CXX=clang++ cmake .
+	# make
+	# sudo make install
+
+	# git clone https://github.com/mackyle/blocksruntime.git
+	# cd blocksruntime
+	# ./buildlib
