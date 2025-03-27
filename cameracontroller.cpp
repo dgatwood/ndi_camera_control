@@ -1844,7 +1844,7 @@ void updatePanTiltPositionOverVISCA(int sock) {
             // The success count.  If it gets high enough (no motion in one
             // second), ignore previous failures.
             if (panMessageSuccessCount++ > minSuccessToIgnore) {
-                panMessageSuccessCount = 0;
+                panMessageFailCount = 0;
             }
         } else {
             // If the camera is supposed to be moving, don't check at all.
@@ -1866,7 +1866,7 @@ void updatePanTiltPositionOverVISCA(int sock) {
             // The success count.  If it gets high enough (no motion in one
             // second), ignore previous failures.
             if (tiltMessageSuccessCount++ > minSuccessToIgnore) {
-                tiltMessageSuccessCount = 0;
+                tiltMessageFailCount = 0;
             }
         } else {
             // If the camera is supposed to be moving, don't check at all.
@@ -1936,7 +1936,7 @@ void updateZoomPositionOverVISCA(int sock) {
             // The success count.  If it gets high enough (no motion in one
             // second), ignore previous failures.
             if (zoomMessageSuccessCount++ > minSuccessToIgnore) {
-                zoomMessageSuccessCount = 0;
+                zoomMessageFailCount = 0;
             }
         } else {
             // If the camera is supposed to be moving, don't check at all.
