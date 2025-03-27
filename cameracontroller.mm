@@ -2663,8 +2663,8 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
         }
 
         NDIlib_recv_ptz_zoom_speed(pNDI_recv, -copyOfMotionData.zoomPosition);
-        g_last_zoom_level = copyOfMotionData.zoomPosition > 0 ? ceil(copyOfMotionData.zoomPosition)
-            : floor(copyOfMotionData.zoomPosition);
+        g_last_zoom_level = copyOfMotionData.zoomPosition > 0 ? ceil(copyOfMotionData.zoomPosition * 20)
+            : floor(copyOfMotionData.zoomPosition * 20);
     }
 
     if (!enable_visca_ptz || !visca_running || g_visca_sock == -1) {
@@ -2687,10 +2687,10 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
         }
 
         NDIlib_recv_ptz_pan_tilt_speed(pNDI_recv, copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
-        g_last_pan_level = copyOfMotionData.xAxisPosition > 0 ? ceil(copyOfMotionData.xAxisPosition)
-            : floor(copyOfMotionData.xAxisPosition);
-        g_last_tilt_level = copyOfMotionData.yAxisPosition > 0 ? ceil(copyOfMotionData.yAxisPosition)
-            : floor(copyOfMotionData.yAxisPosition);
+        g_last_pan_level = copyOfMotionData.xAxisPosition > 0 ? ceil(copyOfMotionData.xAxisPosition * 20)
+            : floor(copyOfMotionData.xAxisPosition * 20);
+        g_last_tilt_level = copyOfMotionData.yAxisPosition > 0 ? ceil(copyOfMotionData.yAxisPosition * 20)
+            : floor(copyOfMotionData.yAxisPosition * 20);
 
         if (enable_ptz_debugging) {
             if (copyOfMotionData.xAxisPosition != 0 || copyOfMotionData.yAxisPosition != 0) {
