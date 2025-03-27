@@ -90,7 +90,7 @@ libtfb_clone:
 
 install_support:
 	sudo apt install clang gnustep gnustep-devel libblocksruntime-dev
-	git clone https://github.com/gnustep/libobjc2.git
+	# git clone https://github.com/gnustep/libobjc2.git
 	# cd libobjc2
 	# CC=clang CXX=clang++ cmake .
 	# make

@@ -1847,8 +1847,13 @@ void updateVISCAMaxSpeed(int sock) {
         // gMaxPanTiltValue = responseBuf[12] << 8 | responseBuf[13];
         fprintf(stderr, "Max zoom value changed to %d\n", gMaxZoomValue);
     } else {
-        fprintf(stderr, "Bad response %s for max zoom value (length %" PRId64 ").\n", // ssize_t
-            fmtbuf(responseBuf, responseLength), (uint64_t)responseLength);
+        if (enable_verbose_debugging) {
+            // This is a nonstandard command specific to cameras that support a VISCA extension
+            // that allows much more precise speed control.  Don't report this as an error,
+            // because it will fail on nearly all VISCA devices.
+            fprintf(stderr, "Bad response %s for max zoom value (length %" PRId64 ").\n", // ssize_t
+                fmtbuf(responseBuf, responseLength), (uint64_t)responseLength);
+        }
     }
 }
 
@@ -2010,9 +2015,12 @@ bool updateZoomPositionOverVISCA(int sock, bool digitalMode) {
             ((responseBuf[4] & 0xf) << 4) | (responseBuf[5] & 0xf);
         gCurrentZoomPosition = (double)rawValue / (double)0xFFFF;
     } else {
-        // For some reason, the cameras periodically drop this request (and only this request).
-        fprintf(stderr, "Bad response %s for zoom position value (length %" PRId64 ").\n",
-            fmtbuf(responseBuf, responseLength), (uint64_t)responseLength);
+        // For some reason, some major brand cameras periodically drop this request (and only
+        // this request).  Silence the error, because it is annoying.
+        if (enable_verbose_debugging) {
+            fprintf(stderr, "Bad response %s for zoom position value (length %" PRId64 ").\n",
+                fmtbuf(responseBuf, responseLength), (uint64_t)responseLength);
+        }
         if (responseLength > 0) {
             // Return a failure if and only if the response from the camera is garbage.  A
             // zero-length response is probably just a timeout, and we don't want this
@@ -2430,21 +2438,27 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
         // Verify that the packet length makes sense or that it is an error packet.
         bool isError = false;
         if (packet->length != (expectedLength + udp_offset)) {
-            fprintf(stderr, "In packetResponseHandler expected length %lld got %lld\n",
-                (long long)expectedLength + udp_offset, (long long)packet->length);
-            fprintf(stderr, "Command:  %s\n", fmtbuf(buf, bufsize));
-            fprintf(stderr, "Response: %s\n", fmtbuf(packet->data, packet->length));
+            if (localDebug) {
+              fprintf(stderr, "In packetResponseHandler expected length %lld got %lld\n",
+                  (long long)expectedLength + udp_offset, (long long)packet->length);
+              fprintf(stderr, "Command:  %s\n", fmtbuf(buf, bufsize));
+              fprintf(stderr, "Response: %s\n", fmtbuf(packet->data, packet->length));
+            }
 
             if (packet->length - udp_offset == 4) {
               if (packet->data[udp_offset] == 0x90 &&
                   packet->data[udp_offset + 1] == 0x60 &&
                   packet->data[udp_offset + 2] == 0x02 &&
                   packet->data[udp_offset + 3] == 0xFF) {
-                fprintf(stderr, "Is a syntax error packet.  Reporting the error.\n");
+                if (localDebug) {
+                  fprintf(stderr, "Is a syntax error packet.  Reporting the error.\n");
+                }
                 isError = true;
               }
             } else {
-              fprintf(stderr, "Not a valid error packet.  Ignoring.\n");
+              if (localDebug) {
+                fprintf(stderr, "Not a valid error packet.  Ignoring.\n");
+              }
               return false;
             }
         } else if (blockResponse[1 + udp_offset] != 0x50) {
