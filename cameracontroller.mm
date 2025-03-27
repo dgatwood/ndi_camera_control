@@ -316,6 +316,7 @@ static bool g_fudge_zoom = false;
 static int g_last_zoom_level = 0;
 static int g_last_pan_level = 0;
 static int g_last_tilt_level = 0;
+static bool g_is_loading_preset = false;
 
 static struct sockaddr *g_visca_sockaddr;
 
@@ -2036,7 +2037,7 @@ bool updateZoomPositionOverVISCA(int sock, bool digitalMode) {
 #endif
     if (!isSet) {
         isSet = true;
-    } else { 
+    } else if (!g_is_loading_preset) { 
         if (g_last_zoom_level == 0 && lastZoomPosition != gCurrentZoomPosition) {
             // If the camera should not be moving, but is, increment the
             // failure count.
@@ -2552,7 +2553,9 @@ int send_visca_packet(int sock, uint8_t *buf, ssize_t bufsize, int timeout_usec,
     if (get_ack(sock, timeout_usec)) {
         return 0;
     } else {
-        fprintf(stderr, "No ack.");
+        if (enable_verbose_debugging) {
+            fprintf(stderr, "No ack.\n");
+        }
         return -1;
     }
 }
@@ -2623,6 +2626,8 @@ bool get_ack(int sock, int timeout_usec) {
                     fprintf(stderr, "DEQUEUE ACK 4 %s\n", fmtbuf(packet->data, packet->length));
                 }
                 packet = deletePacketFromQueue(packet, g_visca_indata);
+            } else {
+                packet = packet->next;
             }
         }
 
@@ -2693,9 +2698,13 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
             }
         }
     }
+    if (copyOfMotionData.xAxisPosition != 0 || copyOfMotionData.yAxisPosition != 0 || copyOfMotionData.zoomPosition != 0) {
+        g_is_loading_preset = false;
+    }
     if (copyOfMotionData.retrievePositionNumber > 0 &&
         copyOfMotionData.retrievePositionNumber != lastMotionData.retrievePositionNumber) {
         fprintf(stderr, "Retrieving position %d\n", copyOfMotionData.retrievePositionNumber);
+        g_is_loading_preset = true;
         if (use_visca_for_presets) {
             sendVISCALoadPreset((uint8_t)copyOfMotionData.retrievePositionNumber, g_visca_sock);
         } else {
