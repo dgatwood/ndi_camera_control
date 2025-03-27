@@ -2464,14 +2464,45 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     }
 
     if (!enable_visca_ptz || !visca_running || g_visca_sock == -1) {
+        // Certain major-brand PTZ cameras have a defect where they sometimes
+        // lose VISCA commands and think that they have changed the speed when
+        // they actually have not.  If the camera is still moving and should be
+        // stopped, send a single nonzero motion command and then immediately
+        // send a stop command again to work around the bug.
+        if (g_fudge_zoom && copyOfMotionData.zoomPosition == 0) {
+            g_fudge_zoom = false;
+            copyOfMotionData.zoomPosition = 0.05;
+        }
+
         NDIlib_recv_ptz_zoom_speed(pNDI_recv, -copyOfMotionData.zoomPosition);
+        g_last_zoom_level = copyOfMotionData.zoomPosition > 0 ? ceil(copyOfMotionData.zoomPosition)
+            : floor(copyOfMotionData.zoomPosition);
     }
 
     if (!enable_visca_ptz || !visca_running || g_visca_sock == -1) {
         if (enable_verbose_debugging || enable_ptz_debugging) {
             fprintf(stderr, "NDI MODE: %f, %f\n", copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
         }
+
+        // Certain major-brand PTZ cameras have a defect where they sometimes
+        // lose VISCA commands and think that they have changed the speed when
+        // they actually have not.  If the camera is still moving and should be
+        // stopped, send a single nonzero motion command and then immediately
+        // send a stop command again to work around the bug.
+        if (g_fudge_pan && copyOfMotionData.xAxisPosition == 0) {
+            g_fudge_pan = false;
+            copyOfMotionData.xAxisPosition = 0.05;
+        }
+        if (g_fudge_tilt && copyOfMotionData.yAxisPosition == 0) {
+            g_fudge_tilt = false;
+            copyOfMotionData.yAxisPosition = 0.05;
+        }
+
         NDIlib_recv_ptz_pan_tilt_speed(pNDI_recv, copyOfMotionData.xAxisPosition, copyOfMotionData.yAxisPosition);
+        g_last_pan_level = copyOfMotionData.xAxisPosition > 0 ? ceil(copyOfMotionData.xAxisPosition)
+            : floor(copyOfMotionData.xAxisPosition);
+        g_last_tilt_level = copyOfMotionData.yAxisPosition > 0 ? ceil(copyOfMotionData.yAxisPosition)
+            : floor(copyOfMotionData.yAxisPosition);
 
         if (enable_ptz_debugging) {
             if (copyOfMotionData.xAxisPosition != 0 || copyOfMotionData.yAxisPosition != 0) {
