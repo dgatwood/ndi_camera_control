@@ -2400,9 +2400,7 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
 
     int expectedLength = get_expected_response_length(buf, bufsize);
 
-    __block sem_t semaphore;
-
-    sem_init(&semaphore, 0, 0);
+    __block pthread_cond_t semaphore = PTHREAD_COND_INITIALIZER;
 
     __block ssize_t localResponseLength = 0;
     __block uint8_t *responseBuf = NULL;
@@ -2479,9 +2477,9 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
         }
 
         if (localDebug) {
-          fprintf(stderr, "sem_post\n");
+          fprintf(stderr, "pthread_cond_signal\n");
         }
-        sem_post(&semaphore);
+        pthread_cond_signal(&semaphore);
         return true;
     };
 
@@ -2500,9 +2498,11 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
       remove_response_handler(handler);
     } else {
       if (localDebug) {
-        fprintf(stderr, "sem_wait\n");
+        fprintf(stderr, "pthread_cond_timedwait\n");
       }
-      if (sem_timedwait(&semaphore, &abs_timeout) < 0) {
+      pthread_mutex_t junk_mutex = PTHREAD_MUTEX_INITIALIZER;
+      pthread_mutex_lock(&junk_mutex);
+      if (pthread_cond_timedwait(&semaphore, &junk_mutex, &abs_timeout) < 0) {
         if (localDebug) {
           fprintf(stderr, "Read timeout.\n");
         }
@@ -2513,10 +2513,14 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
         *responseLength = 0;
         return NULL;
       }
+      pthread_mutex_unlock(&junk_mutex);
+      pthread_mutex_destroy(&junk_mutex);
       if (localDebug) {
-        fprintf(stderr, "sem_wait done\n");
+        fprintf(stderr, "pthread_cond_timedwait done\n");
       }
     }
+
+    pthread_cond_destroy(&semaphore);
 
     *responseLength = localResponseLength;
     return responseBuf;
@@ -3644,7 +3648,7 @@ visca_network_packet_t newVISCANetworkPacket(uint8_t *data, size_t length, bool 
 void printQueue(visca_network_queue_t queue) {
   visca_network_packet_t packet = queue->head;
   while (packet) {
-    fprintf(stderr, "[Packet length %d]\n", packet->length);
+    fprintf(stderr, "[Packet length %zu]\n", packet->length);
     packet = packet->next;
   }
 }
