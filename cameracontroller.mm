@@ -245,6 +245,7 @@ typedef struct response_handler_queue_item {
 
 response_handler_queue_item_t g_response_handler_queue;
 
+void debug_response_handlers(const char *context);
 void add_response_handler(packetResponseHandler handler);
 void remove_response_handler_item(response_handler_queue_item_t handler);
 void remove_response_handler(packetResponseHandler handler);
@@ -2468,9 +2469,15 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
         }
 
         if (isError) {
+          if (localDebug) {
+            fprintf(stderr, "Returning error.\n");
+          }
           localResponseLength = 0;
           responseBuf = NULL;
         } else {
+          if (localDebug) {
+            fprintf(stderr, "Returning data.\n");
+          }
           localResponseLength = packet->length - udp_offset;
           responseBuf = (uint8_t *)malloc(localResponseLength);
           bcopy(blockResponse + udp_offset, responseBuf, localResponseLength);
@@ -2502,7 +2509,7 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
       }
       pthread_mutex_t junk_mutex = PTHREAD_MUTEX_INITIALIZER;
       pthread_mutex_lock(&junk_mutex);
-      if (pthread_cond_timedwait(&semaphore, &junk_mutex, &abs_timeout) < 0) {
+      if (pthread_cond_timedwait(&semaphore, &junk_mutex, &abs_timeout) != 0) {
         if (localDebug) {
           fprintf(stderr, "Read timeout.\n");
         }
@@ -2511,6 +2518,7 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
         remove_response_handler(handler);
 
         *responseLength = 0;
+        debug_response_handlers("Inquiry return[1]");
         return NULL;
       }
       pthread_mutex_unlock(&junk_mutex);
@@ -2523,6 +2531,7 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
     pthread_cond_destroy(&semaphore);
 
     *responseLength = localResponseLength;
+    debug_response_handlers("Inquiry return[2]");
     return responseBuf;
 }
 
@@ -3718,6 +3727,24 @@ void push_packet(uint8_t *data, size_t length, visca_network_queue_t queue, bool
   pthread_mutex_unlock(&g_networkMutex);
 }
 
+void debug_response_handlers_locked(const char *context) {
+  bool localDebug = enable_verbose_debugging || false;
+
+  if (localDebug) {
+    fprintf(stderr, "RESPONSE QUEUE AT %s:\n", context);
+    for (response_handler_queue_item_t item = g_response_handler_queue ; item != NULL; item = item->next) {
+      fprintf(stderr, "    0x%p -> 0x%p\n", item, item->handlerBlock);
+    }
+    fprintf(stderr, "END RESPONSE QUEUE\n");
+  }
+}
+
+void debug_response_handlers(const char *context) {
+  pthread_mutex_lock(&g_networkMutex);
+  debug_response_handlers_locked(context);
+  pthread_mutex_lock(&g_networkMutex);
+}
+
 void add_response_handler(packetResponseHandler handler) {
   response_handler_queue_item_t item = (response_handler_queue_item_t)malloc(sizeof(*item));
   item->handlerBlock = handler;
@@ -3729,12 +3756,14 @@ void add_response_handler(packetResponseHandler handler) {
     g_response_handler_queue->prev = item;
   }
   g_response_handler_queue = item;
+  debug_response_handlers_locked("add_response_handler end");
   pthread_mutex_unlock(&g_networkMutex);
 }
 
 void remove_response_handler(packetResponseHandler handler) {
   pthread_mutex_lock(&g_networkMutex);
 
+  debug_response_handlers_locked("remove_response_handler start");
   for (response_handler_queue_item_t handlerItem = g_response_handler_queue;
        handlerItem; handlerItem = handlerItem->next) {
     if (handlerItem->handlerBlock == handler) {
@@ -3744,6 +3773,7 @@ void remove_response_handler(packetResponseHandler handler) {
   }
   fprintf(stderr, "WARNING: Could not remove handler in remove_response_handler!\n");
 
+  debug_response_handlers_locked("remove_response_handler end");
   pthread_mutex_unlock(&g_networkMutex);
 }
 
@@ -3794,7 +3824,10 @@ void process_incoming_packets(void) {
                 fprintf(stderr, "DEQUEUE HANDLED %s\n", fmtbuf(packet->data, packet->length));
             }
             packet = deletePacketFromQueue(packet, g_visca_indata);
+            if (enable_verbose_debugging) fprintf(stderr, "Packet dequeued.  Will remove handler item 0x%p", handler);
+            debug_response_handlers_locked("Packet handling (pre)");
             remove_response_handler_item(handler);
+            debug_response_handlers_locked("Packet handling (post)");
             break;
         }
     }
