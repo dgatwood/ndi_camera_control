@@ -1801,11 +1801,16 @@ int directlyConnectToVISCAPortWithAddress(const struct sockaddr *address) {
     return sock;
 }
 
+#define GO_SLOW 0
+
 void updateVISCAMaxSpeed(int sock);
 void updateTallyLightsOverVISCA(int sock);
 void updateZoomPositionOverVISCA(int sock);
 bool updateZoomPositionOverVISCA(int sock, bool digitalMode);
 void sendZoomUpdatesOverVISCA(int sock, motionData_t *motionData);
+#if GO_SLOW
+void sendPanTiltSpeedOverVISCA(int sock, motionData_t *motionData);
+#endif
 void sendPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData);
 void sendExposureCompensationOverVISCA(int sock);
 void sendManualExposureOverVISCA(int sock);
@@ -1815,6 +1820,9 @@ void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
     updateTallyLightsOverVISCA(g_visca_sock);
     updateZoomPositionOverVISCA(g_visca_sock);
     if (enable_visca_ptz) {
+#if GO_SLOW
+        sendPanTiltSpeedOverVISCA(g_visca_sock, motionData);
+#endif
         sendZoomUpdatesOverVISCA(g_visca_sock, motionData);
         sendPanTiltUpdatesOverVISCA(g_visca_sock, motionData);
 #ifdef USE_VISCA_FOR_EXPOSURE_COMPENSATION
@@ -2184,6 +2192,44 @@ void sendZoomUpdatesOverVISCA(int sock, motionData_t *motionData) {
         send_visca_packet(sock, buf, sizeof(buf), VISCA_ACK_TIMEOUT, false, NULL);
     }
 }
+
+#if GO_SLOW
+// This was an attempt to make Newtek's PTZ cameras move at a usable speed at long zooms.
+// Unfortunately, it had no effect.
+
+void sendPanTiltSpeedOverVISCA(int sock, motionData_t *motionData) {
+    if (gMaxPanTiltValue != 0) {
+      // Instead of doing some bizarre scaling, hardware that supports the VISCA extension
+      // just allows a much greater range of speeds.  Don't bother sending this command,
+      // because it isn't supported anyway.
+      fprintf(stderr, "Skipping pan/tilt speed for extended VISCA camera.\n");
+      return;
+    }
+
+    const bool localDebug = false;
+
+    double zoomPercent = gCurrentZoomPosition / g_max_zoom;  // Scale to a range 0..1
+    zoomPercent = MIN(zoomPercent, 1.0);
+    zoomPercent = MAX(zoomPercent, 0.0);
+
+    uint8_t speed = 24.01 - (19 * zoomPercent);
+
+    fprintf(stderr, "Zoom speed set to %d\n", speed);
+
+#if 0
+    // Set the move speed.
+    uint8_t buf[9] = { 0x81, 0x01, 0x04, 0xC1, 0x00, 0x00, speed, speed, 0xFF };
+    if (localDebug) fprintf(stderr, "Sent packet %s\n", fmtbuf(buf, 9));
+    send_visca_packet(sock, buf, sizeof(buf), VISCA_ACK_TIMEOUT, false, NULL);
+#else
+    // Set the move speed to be zoom-dependent.
+    uint8_t buf[6] = { 0x81, 0x01, 0x06, 0xA0, 0x02, 0xFF };
+    if (localDebug) fprintf(stderr, "Sent packet %s\n", fmtbuf(buf, 6));
+    send_visca_packet(sock, buf, sizeof(buf), VISCA_ACK_TIMEOUT, false, NULL);
+#endif
+
+}
+#endif
 
 void sendExtendedPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData);
 void sendPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData) {
@@ -3839,7 +3885,7 @@ void process_incoming_packets(void) {
                 fprintf(stderr, "DEQUEUE HANDLED %s\n", fmtbuf(packet->data, packet->length));
             }
             packet = deletePacketFromQueue(packet, g_visca_indata);
-            if (enable_verbose_debugging) fprintf(stderr, "Packet dequeued.  Will remove handler item 0x%p", handler);
+            if (enable_verbose_debugging) fprintf(stderr, "Packet dequeued.  Will remove handler item 0x%p\n", handler);
             debug_response_handlers_locked("Packet handling (pre)");
             remove_response_handler_item(handler);
             debug_response_handlers_locked("Packet handling (post)");
