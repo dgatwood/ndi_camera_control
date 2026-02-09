@@ -314,6 +314,8 @@ static bool g_fudge_pan = false;
 static bool g_fudge_tilt = false;
 static bool g_fudge_zoom = false;
 
+float g_max_zoom = 0.25;
+
 static int g_last_zoom_level = 0;
 static int g_last_pan_level = 0;
 static int g_last_tilt_level = 0;
@@ -576,9 +578,14 @@ int main(int argc, char *argv[]) {
             g_use_on_screen_lights = true;
         }
 #endif // __linux__
-        if (!strcmp(argv[i], "-B") || !strcmp(argv[i], "--buttondebug")) {
+        if (!strcmp(argv[i], "-m") || !strcmp(argv[i], "--maxzoom")) {
             fprintf(stderr, "Enabling button debugging.\n");
-            enable_button_debugging = true;
+            if (argc > i + 1) {
+                g_max_zoom = atof(argv[i+1]);
+                i++;
+            } else {
+                fprintf(stderr, "-m / --maxzoom flag takes an argument");
+            }
         }
         if (!strcmp(argv[i], "-P") || !strcmp(argv[i], "--ptzdebug")) {
             fprintf(stderr, "Enabling PTZ debugging.\n");
@@ -3599,10 +3606,12 @@ float scaleAxisValue(int axis, int rawValue) {
 
   // If VISCA is enabled, even if we're using NDI for PTZ control, we can still poll the zoom
   // position and be smart about the pan and tilt speed.
-  if (enable_visca) {
+  if (enable_visca && axis != kPTZAxisZoom) {
     // Range is 0 to 1, where 1 is zoomed all the way in, with 20x being about 0x4000, 30x about
     // 0x6000, etc., or at least that seems to be the typical range.  After scaling, this is
-    // 0.25 for 20x and 0.375 for 30x.
+    // 0.25 for 20x and 0.375 for 30x.  (Based on my Marshall cameras.)
+    //
+    // Not all cameras are equal.  NewTek PTZUHD uses 0.25 as 30x.
     //
     // Based on this, a zoom position of 0 (zoomed out) has no effect, and a zoom position of
     // 0.375 (30x) is capped at about 25% of normal speed.
@@ -3610,11 +3619,17 @@ float scaleAxisValue(int axis, int rawValue) {
     // This also caps the minimum speed at 0.1x so that no matter how far in you zoom, you don't
     // lose the ability to pan and tilt, and caps the maximum scale at 1.0 in case something is
     // very, very wrong.
-    double scale = MIN(MAX(1 - (2 * gCurrentZoomPosition), 0.1), 1.0);
-    if (enable_verbose_debugging) {
-        fprintf(stderr, "Current zoom position: %lf\nScale: %lf\n", gCurrentZoomPosition, scale);
+
+    double zoomPercent = gCurrentZoomPosition / g_max_zoom;  // Scale to a range 0..1
+    double scale = 1 + (7.0 * zoomPercent);  // At 0 zoom, scale is 1.  At 1 zoom, scale is 8.
+
+    if (scale < 1) scale = 1;
+    if (scale > 10) scale = 10;
+    
+    if (enable_verbose_debugging || true) {
+        fprintf(stderr, "Current zoom position: %lf\nZoom percent: %lf\nScale: %lf\n", gCurrentZoomPosition, zoomPercent, scale);
     }
-    value *= scale;
+    value /= scale;
   }
 
   return value;
