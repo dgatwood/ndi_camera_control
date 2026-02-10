@@ -35,6 +35,15 @@ extern "C" {
 
 #define BOOLSTR(boolval) (boolval ? 'Y' : 'N')
 
+// Failed attempts at working around lack of zoom tilt/pan-speed compensation in some
+// PTZ cameras. It turns out that the feature actually does exist in my cameras, but
+// can only be turned on by plugging it into HDMI and changing the settings in the
+// onscreen menus, but I'll leave these in, just in case they're useful for someone
+// someday.
+#undef ENABLE_PAN_TILT_SPEED_COMPENSATION
+#define GO_SLOW 0
+
+
 #define PACKET_TIMEOUT 1000  /* 1 msec */
 #define VISCA_ACK_TIMEOUT 200000  /* 200 milliseconds */
 #define MIN_TALLY_INTERVAL 10000 /* 10 msec */
@@ -314,7 +323,9 @@ static bool g_fudge_pan = false;
 static bool g_fudge_tilt = false;
 static bool g_fudge_zoom = false;
 
+#ifdef ENABLE_PAN_TILT_SPEED_COMPENSATION
 float g_max_zoom = 0.25;
+#endif  // ENABLE_PAN_TILT_SPEED_COMPENSATION
 
 static int g_last_zoom_level = 0;
 static int g_last_pan_level = 0;
@@ -578,6 +589,7 @@ int main(int argc, char *argv[]) {
             g_use_on_screen_lights = true;
         }
 #endif // __linux__
+#ifdef ENABLE_PAN_TILT_SPEED_COMPENSATION
         if (!strcmp(argv[i], "-m") || !strcmp(argv[i], "--maxzoom")) {
             fprintf(stderr, "Enabling button debugging.\n");
             if (argc > i + 1) {
@@ -587,6 +599,7 @@ int main(int argc, char *argv[]) {
                 fprintf(stderr, "-m / --maxzoom flag takes an argument");
             }
         }
+#endif  // ENABLE_PAN_TILT_SPEED_COMPENSATION
         if (!strcmp(argv[i], "-P") || !strcmp(argv[i], "--ptzdebug")) {
             fprintf(stderr, "Enabling PTZ debugging.\n");
             enable_ptz_debugging = true;
@@ -1801,8 +1814,6 @@ int directlyConnectToVISCAPortWithAddress(const struct sockaddr *address) {
     return sock;
 }
 
-#define GO_SLOW 0
-
 void updateVISCAMaxSpeed(int sock);
 void updateTallyLightsOverVISCA(int sock);
 void updateZoomPositionOverVISCA(int sock);
@@ -2193,6 +2204,7 @@ void sendZoomUpdatesOverVISCA(int sock, motionData_t *motionData) {
     }
 }
 
+#ifdef ENABLE_PAN_TILT_SPEED_COMPENSATION
 #if GO_SLOW
 // This was an attempt to make Newtek's PTZ cameras move at a usable speed at long zooms.
 // Unfortunately, it had no effect.
@@ -2217,19 +2229,20 @@ void sendPanTiltSpeedOverVISCA(int sock, motionData_t *motionData) {
     fprintf(stderr, "Zoom speed set to %d\n", speed);
 
 #if 0
-    // Set the move speed.
+    // Set the move speed.  In theory, this should probably work, but doesn't.
     uint8_t buf[9] = { 0x81, 0x01, 0x04, 0xC1, 0x00, 0x00, speed, speed, 0xFF };
     if (localDebug) fprintf(stderr, "Sent packet %s\n", fmtbuf(buf, 9));
     send_visca_packet(sock, buf, sizeof(buf), VISCA_ACK_TIMEOUT, false, NULL);
 #else
-    // Set the move speed to be zoom-dependent.
+    // Set the move speed to be zoom-dependent.  This command should work, but doesn't.
     uint8_t buf[6] = { 0x81, 0x01, 0x06, 0xA0, 0x02, 0xFF };
     if (localDebug) fprintf(stderr, "Sent packet %s\n", fmtbuf(buf, 6));
     send_visca_packet(sock, buf, sizeof(buf), VISCA_ACK_TIMEOUT, false, NULL);
 #endif
 
 }
-#endif
+#endif  // GO_SLOW
+#endif  // ENABLE_PAN_TILT_SPEED_COMPENSATION
 
 void sendExtendedPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData);
 void sendPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData) {
@@ -3650,6 +3663,7 @@ float scaleAxisValue(int axis, int rawValue) {
       fprintf(stderr, "axis %d: raw: %d scaled: %f ", axis, rawValue, value);
   }
 
+#ifdef ENABLE_PAN_TILT_SPEED_COMPENSATION
   // If VISCA is enabled, even if we're using NDI for PTZ control, we can still poll the zoom
   // position and be smart about the pan and tilt speed.
   if (enable_visca && axis != kPTZAxisZoom) {
@@ -3677,6 +3691,7 @@ float scaleAxisValue(int axis, int rawValue) {
     }
     value /= scale;
   }
+#endif  // ENABLE_PAN_TILT_SPEED_COMPENSATION
 
   return value;
 }
