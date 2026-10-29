@@ -2339,9 +2339,9 @@ void sendExtendedPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData) {
                         pan_command, tilt_command, 0xFF };
 
     buf[6] = (abs(pan_level) >> 8) & 0xff;
-    buf[7] = pan_level & 0xff;
+    buf[7] = abs(pan_level) & 0xff;
     buf[8] = (abs(tilt_level) >> 8) & 0xff;
-    buf[9] = tilt_level & 0xff;
+    buf[9] = abs(tilt_level) & 0xff;
 
     if (localDebug) fprintf(stderr, "Sent packet %s\n", fmtbuf(buf, 9));
 
@@ -2698,8 +2698,7 @@ bool get_ack(int sock, int timeout_usec) {
                     fprintf(stderr, "DEQUEUE ACK 5 %s\n", fmtbuf(packet->data, packet->length));
                 }
                 packet = deletePacketFromQueue(packet, g_visca_indata);
-            }
-            if (ack_type == 4 && !found_4) {
+            } else if (ack_type == 4 && !found_4) {
                 found_4 = true;
                 if (enable_verbose_debugging) {
                     fprintf(stderr, "DEQUEUE ACK 4 %s\n", fmtbuf(packet->data, packet->length));
@@ -3794,6 +3793,7 @@ void push_packet(uint8_t *data, size_t length, visca_network_queue_t queue, bool
   } else {
     queue->tail->next = packet;
     packet->prev = queue->tail;
+    queue->tail = packet;
   }
 
   if (enable_verbose_debugging) {
@@ -3818,7 +3818,7 @@ void debug_response_handlers_locked(const char *context) {
 void debug_response_handlers(const char *context) {
   pthread_mutex_lock(&g_networkMutex);
   debug_response_handlers_locked(context);
-  pthread_mutex_lock(&g_networkMutex);
+  pthread_mutex_unlock(&g_networkMutex);
 }
 
 void add_response_handler(packetResponseHandler handler) {
@@ -3931,7 +3931,7 @@ int ackType(visca_network_packet_t packet) {
     if (enable_verbose_debugging) {
         fprintf(stderr, "in ackType\n");
     }
-    if (packet->length != 3) return -1;
+    if (packet->length != 3 && packet->length != 3 + udp_offset) return -1;
     if (!packet->data) return -1;
     if (packet->data[0 + udp_offset] != 0x90 && localDebug) {
         if (localDebug) fprintf(stderr, "Unexpected ack address 0x%02x\n", packet->data[0 + udp_offset]);
