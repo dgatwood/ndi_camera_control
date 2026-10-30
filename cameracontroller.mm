@@ -845,8 +845,10 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
                             g_active_receivers = receiver_item;
                             fprintf(stderr, "Connected.\n");
                             if (g_visca_sock != -1) {
+                                pthread_mutex_lock(&g_networkMutex);
                                 close(g_visca_sock);
                                 g_visca_sock = -1;
+                                pthread_mutex_unlock(&g_networkMutex);
                             }
                             if (enable_visca) {
                                 visca_running = connectVISCA(stream_name, "1");
@@ -1470,6 +1472,10 @@ bool connectVISCA(char *stream_name, const char *context) {
 
     g_avahi_simple_poll = avahi_simple_poll;
     g_avahi_client = avahi_client;
+
+    if (g_avahi_service_browser != NULL) {
+        avahi_service_browser_free(g_avahi_service_browser);
+    }
     g_avahi_service_browser = avahi_service_browser;
 
     pthread_mutex_unlock(&g_avahiMutex);
@@ -1606,7 +1612,10 @@ void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
                                  const char *replyDomain,
                                  void *context);
 
-bool connectVISCA(char *stream_name, const char *context) {
+bool connectVISCA(char *unsafe_stream_name, const char *context) {
+    char *stream_name = NULL;
+    asprintf(&stream_name, "%s", unsafe_stream_name);
+
     if (g_browseRef != NULL) {
         DNSServiceRefDeallocate(g_browseRef);
         g_browseRef = NULL;
@@ -1644,6 +1653,7 @@ void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
     if (errorCode) {
         fprintf(stderr, "Service browser for VISCA failed (error %d)\n", errorCode);
         DNSServiceRefDeallocate(sdRef);
+        free(context);
         g_browseRef = NULL;
         connectVISCA((char *)context, "3");
         return;
@@ -1665,6 +1675,7 @@ void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
                               != kDNSServiceErr_NoError) {
             fprintf(stderr, "Could not start service resolver for VISCA (error %d)\n", errorCode);
             DNSServiceRefDeallocate(sdRef);
+            free(context);
             g_browseRef = NULL;
             connectVISCA((char *)context, "4");
             return;
@@ -1674,6 +1685,7 @@ void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
     }
     if (flags & kDNSServiceFlagsMoreComing) { return; }  // Keep browsing until we have a full response.
     DNSServiceRefDeallocate(sdRef);
+    free(context);
     g_browseRef = NULL;
 }
 
@@ -1775,13 +1787,13 @@ int directlyConnectToVISCAPortWithAddress(const struct sockaddr *address) {
     struct sockaddr_in sa;
     memcpy((void *)&sa, (void *)address, sizeof(struct sockaddr_in));
 
+    // Marshall uses 52381 UDP; PTZOptics uses 5678 TCP or 1259 UDP.
+    int port = g_visca_port ?: (g_visca_use_udp ? 1259 : 5678);
+
     if (g_visca_port != 0) {
-        fprintf(stderr, "Connecting to custom VISCA port %d\n", g_visca_port);
-        sa.sin_port = htons(g_visca_port);
-    } else {
-        // Marshall uses 52381 UDP; PTZOptics uses 5678 TCP or 1259 UDP.
-        sa.sin_port = g_visca_use_udp ? htons(1259) : htons(5678);
+        fprintf(stderr, "Connecting to custom VISCA port %d\n", port);
     }
+    sa.sin_port = htons(port);
 
     fprintf(stderr, "Connecting to VISCA port %d on %s\n", htons(sa.sin_port), inet_ntoa(sa.sin_addr));
 
@@ -1799,7 +1811,7 @@ int directlyConnectToVISCAPortWithAddress(const struct sockaddr *address) {
     bzero(&sa_recv, sizeof(sa_recv));
     sa_recv.sin_family = AF_INET;
     sa_recv.sin_addr.s_addr = INADDR_ANY;
-    sa_recv.sin_port = htons(g_visca_port + 1);
+    sa_recv.sin_port = htons(port + 1);
     if (bind(sock, (sockaddr *)&sa_recv, sizeof(sa_recv)) != 0) {
         perror("Bind failed");
         close(sock);
@@ -4040,6 +4052,11 @@ void *runNetworkThread(void *argIgnored) {
                 fprintf(stderr, "Write set\n");
             }
             pthread_mutex_lock(&g_networkMutex);
+            if (sock != g_visca_sock) {
+                // The socket changed while the network thread was unlocked (unlikely).  Run away.
+                pthread_mutex_unlock(&g_networkMutex);
+                continue;
+            }
             visca_network_packet_t packet = g_visca_outdata->head;
             if (packet) {
                 if (enable_verbose_debugging || localDebug) {
