@@ -1795,7 +1795,7 @@ int directlyConnectToVISCAPortWithAddress(const struct sockaddr *address) {
     }
     sa.sin_port = htons(port);
 
-    fprintf(stderr, "Connecting to VISCA port %d on %s\n", htons(sa.sin_port), inet_ntoa(sa.sin_addr));
+    fprintf(stderr, "Connecting to VISCA port %d on %s\n", ntohs(sa.sin_port), inet_ntoa(sa.sin_addr));
 
     int sock = g_visca_use_udp ?
         socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP) :
