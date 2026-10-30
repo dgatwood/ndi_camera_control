@@ -1922,7 +1922,7 @@ void updatePanTiltPositionOverVISCA(int sock) {
         fprintf(stderr, "Getting pan and tilt position.\n");
     }
     uint8_t *responseBuf = send_visca_inquiry(sock, buf, sizeof(buf), 20000, &responseLength);
-    if (responseBuf && responseLength == 11 && responseBuf[1] == 0x50 && responseBuf[3] == 0xff) {
+    if (responseBuf && responseLength == 11 && responseBuf[1] == 0x50 && responseBuf[10] == 0xff) {
         if (enable_verbose_debugging) {
             fprintf(stderr, "Got pan and tilt position data: %s\n", fmtbuf(responseBuf, responseLength));
         }
@@ -1978,7 +1978,7 @@ void updatePanTiltPositionOverVISCA(int sock) {
             tiltMessageSuccessCount = 0;
             tiltMessageFailCount = 0;
         }
-        if (panMessageFailCount >= minFailureToIgnore) {
+        if (tiltMessageFailCount >= minFailureToIgnore) {
             fprintf(stderr, "@@@ WARNING: FUDGING TILT BECAUSE CAMERA DID NOT STOP");
             g_fudge_tilt = true;
         }
@@ -2406,6 +2406,9 @@ void sendManualExposureOverVISCA(int sock) {
 
 void sendExposureCompensationOverVISCA(int sock) {
     if (!g_set_exposure_compensation) { return; }
+
+    // Don't start sending before the socket is configured.
+    if (sock == -1) return;
 
     // Send this command only a few times on launch.
     static int count = 5;
@@ -4001,7 +4004,7 @@ void *runNetworkThread(void *argIgnored) {
       // This will add a millisecond of latency to every outgoing packet, but will
       // save a lot of CPU on the network thread.
       //
-      // Because this is mainly run on dedicated hardware, we're intentionlly burning
+      // Because this is mainly run on dedicated hardware, we're intentionally burning
       // the CPU cycles to avoid any latency at all.
       FD_SET(sock, &writefds);
     }
