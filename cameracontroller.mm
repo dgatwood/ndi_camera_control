@@ -927,7 +927,7 @@ void *runNDIRunLoop(void *receiver_thread_data_ref) {
     receiver_thread_data_t thread_data = (receiver_thread_data_t)receiver_thread_data_ref;
     const NDIlib_v3 *p_NDILib = thread_data->p_NDILib;
     NDIlib_recv_instance_t pNDI_recv = thread_data->pNDI_recv;
-    char *stream_name = stream_name;
+    char *stream_name = thread_data->stream_name;
 
     bool exit_loop = false;
     while(!exit_loop && !exit_app) {
@@ -1845,6 +1845,8 @@ void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
 
 int send_visca_packet(int sock, uint8_t *buf, ssize_t bufsize, int timeout_usec, bool isInquiry,
                       uint32_t *outSequenceNumber);
+
+// Returns a malloc'ed block.  Be sure to free the result.
 uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout_usec, ssize_t *responseLength);
 
 // Custom VISCA command, because 8 speeds aren't enough to properly drive Panasonic cameras.  This is a
@@ -1883,6 +1885,7 @@ void updateVISCAMaxSpeed(int sock) {
                 fmtbuf(responseBuf, responseLength), (uint64_t)responseLength);
         }
     }
+    free(responseBuf);
 }
 
 void updatePanTiltPositionOverVISCA(int sock) {
@@ -1979,6 +1982,7 @@ void updatePanTiltPositionOverVISCA(int sock) {
         lastPanPosition = gCurrentPanPosition;
         lastTiltPosition = gCurrentTiltPosition;
     }
+    free(responseBuf);
 }
 
 void updateZoomPositionOverVISCA(int sock) {
@@ -2056,6 +2060,7 @@ bool updateZoomPositionOverVISCA(int sock, bool digitalMode) {
             failed = true;
         }
     }
+    free(responseBuf);
 #if 0
     fprintf(stderr, "Last zoom speed: %d\n", g_last_zoom_level);
     fprintf(stderr, "Last zoom position: %lf\nCurrent zoom position: %lf\n", lastZoomPosition, gCurrentZoomPosition);
@@ -2131,6 +2136,7 @@ void updateTallyLightsOverVISCA(int sock) {
             fprintf(stderr, "Unknown tally mode %d\n", tallyMode);
         }
     }
+    free(responseBuf);
 }
 
 void sendVISCASetRecallSpeed(uint8_t speed, int sock) {
@@ -2351,6 +2357,9 @@ void sendExtendedPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData) {
 void sendManualExposureOverVISCA(int sock) {
     bool localDebug = enable_ptz_debugging;
 
+    // Don't start sending before the socket is configured.
+    if (sock == -1) return;
+
     // Send this command only a few times on launch.
     static int count = 5;
     if (!count) return;
@@ -2361,7 +2370,7 @@ void sendManualExposureOverVISCA(int sock) {
         uint8_t disablebuf[6] = { 0x81, 0x01, 0x04, 0x39, 0x00, 0xFF };
         send_visca_packet(sock, disablebuf, sizeof(disablebuf), VISCA_ACK_TIMEOUT, false, NULL);
         return;
-    } else if (!(g_set_manual_iris || g_set_manual_gain || g_set_manual_gain)) {
+    } else if (!(g_set_manual_iris || g_set_manual_gain || g_set_manual_shutter)) {
         return;
     }
 
@@ -2383,11 +2392,11 @@ void sendManualExposureOverVISCA(int sock) {
         send_visca_packet(sock, gainbuf, sizeof(gainbuf), VISCA_ACK_TIMEOUT, false, NULL);
     }
 
-    if (g_set_manual_gain) {
-        if (localDebug) fprintf(stderr, "Setting gain position.\n");
-        uint8_t gainbuf[9] = { 0x81, 0x01, 0x04, 0x4A, 0x00, 0x00,
-                               (uint8_t)(g_manual_gain >> 4), (uint8_t)(g_manual_gain & 0xF), 0xFF };
-        send_visca_packet(sock, gainbuf, sizeof(gainbuf), VISCA_ACK_TIMEOUT, false, NULL);
+    if (g_set_manual_shutter) {
+        if (localDebug) fprintf(stderr, "Setting shutter position.\n");
+        uint8_t shutterbuf[9] = { 0x81, 0x01, 0x04, 0x4A, 0x00, 0x00,
+                               (uint8_t)(g_manual_shutter >> 4), (uint8_t)(g_manual_shutter & 0xF), 0xFF };
+        send_visca_packet(sock, shutterbuf, sizeof(shutterbuf), VISCA_ACK_TIMEOUT, false, NULL);
     }
 }
 
@@ -3980,6 +3989,14 @@ void *runNetworkThread(void *argIgnored) {
     FD_ZERO(&writefds);
     if (g_visca_sock != -1) {
       FD_SET(g_visca_sock, &readfds);
+
+      // Performance note: If you're concerned about performance, you can take the
+      // network lock and set this if and only if g_visca_outdata->head is non-nil.
+      // This will add a millisecond of latency to every outgoing packet, but will
+      // save a lot of CPU on the network thread.
+      //
+      // Because this is mainly run on dedicated hardware, we're intentionlly burning
+      // the CPU cycles to avoid any latency at all.
       FD_SET(g_visca_sock, &writefds);
     }
     struct timeval tv;
