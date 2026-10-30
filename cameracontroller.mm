@@ -839,9 +839,9 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
                         thread_data->p_NDILib = p_NDILib;
                         thread_data->pNDI_recv = receiver_item->receiver;
                         safe_asprintf(&thread_data->stream_name, "%s", stream_name);
-                        thread_data->running = true;
                         receiver_item->thread_data = thread_data;
                         if (pthread_create(&receiver_item->receiver_thread, NULL, runNDIRunLoop, thread_data) == 0) {
+                            thread_data->running = true;
                             g_active_receivers = receiver_item;
                             fprintf(stderr, "Connected.\n");
                             if (g_visca_sock != -1) {
@@ -878,7 +878,7 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
                         while (previous_receiver_item != NULL && previous_receiver_item->next != receiver_item) {
                             previous_receiver_item = previous_receiver_item->next;
                         }
-                        if (previous_receiver_item->next == receiver_item) {
+                        if (previous_receiver_item != NULL && previous_receiver_item->next == receiver_item) {
                             previous_receiver_item->next = next_receiver;
                         }
                     }
@@ -1007,6 +1007,7 @@ void *runNDIRunLoop(void *receiver_thread_data_ref) {
             }
         }
     }
+    thread_data->running = false;
     return NULL;
 }
 
