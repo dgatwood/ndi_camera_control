@@ -840,8 +840,8 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
                         thread_data->pNDI_recv = receiver_item->receiver;
                         safe_asprintf(&thread_data->stream_name, "%s", stream_name);
                         receiver_item->thread_data = thread_data;
+                        thread_data->running = true;
                         if (pthread_create(&receiver_item->receiver_thread, NULL, runNDIRunLoop, thread_data) == 0) {
-                            thread_data->running = true;
                             g_active_receivers = receiver_item;
                             fprintf(stderr, "Connected.\n");
                             if (g_visca_sock != -1) {
@@ -852,6 +852,8 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
                                 visca_running = connectVISCA(stream_name, "1");
                             }
                         } else {
+                            p_NDILib->NDIlib_recv_destroy(receiver_item->receiver);
+                            thread_data->running = false;
                             free_receiver_item(receiver_item);
                         }
                     }
@@ -861,6 +863,7 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
             while (receiver_item != NULL) {
                 receiver_array_item_t next_receiver = receiver_item->next;
                 if (!receiver_item->thread_data->running) {
+                    pthread_detach(receiver_item->receiver_thread);
                     if (receiver_item->receiver != nullptr) {
                         // Clean up the NDI receiver (stops packet transmission).
 
@@ -3854,6 +3857,7 @@ void remove_response_handler(packetResponseHandler handler) {
        handlerItem; handlerItem = handlerItem->next) {
     if (handlerItem->handlerBlock == handler) {
       remove_response_handler_item(handlerItem);
+      pthread_mutex_unlock(&g_networkMutex);
       return;
     }
   }
@@ -3970,8 +3974,9 @@ void *runNetworkThread(void *argIgnored) {
     ssize_t localResponseLength = 0;
 
     pthread_mutex_lock(&g_networkMutex);
-    if (g_visca_sock == -1 && g_visca_sockaddr != NULL) {
-      int sock = directlyConnectToVISCAPortWithAddress(g_visca_sockaddr);
+    int sock = g_visca_sock;
+    if (sock == -1 && g_visca_sockaddr != NULL) {
+      sock = directlyConnectToVISCAPortWithAddress(g_visca_sockaddr);
       g_visca_sock = sock;
       if (sock == -1) {
           fprintf(stderr, "VISCA failed.");
@@ -3988,8 +3993,8 @@ void *runNetworkThread(void *argIgnored) {
     fd_set readfds, writefds;
     FD_ZERO(&readfds);
     FD_ZERO(&writefds);
-    if (g_visca_sock != -1) {
-      FD_SET(g_visca_sock, &readfds);
+    if (sock != -1) {
+      FD_SET(sock, &readfds);
 
       // Performance note: If you're concerned about performance, you can take the
       // network lock and set this if and only if g_visca_outdata->head is non-nil.
@@ -3998,7 +4003,7 @@ void *runNetworkThread(void *argIgnored) {
       //
       // Because this is mainly run on dedicated hardware, we're intentionlly burning
       // the CPU cycles to avoid any latency at all.
-      FD_SET(g_visca_sock, &writefds);
+      FD_SET(sock, &writefds);
     }
     struct timeval tv;
     tv.tv_sec = 0;
@@ -4006,13 +4011,13 @@ void *runNetworkThread(void *argIgnored) {
     ssize_t received_length = 0;
     bool should_continue = true;
 
-    int first_sock = select(g_visca_sock + 1, &readfds, &writefds, NULL, &tv);
+    int first_sock = select(sock + 1, &readfds, &writefds, NULL, &tv);
     if (first_sock > 0) {
-        if (FD_ISSET(g_visca_sock, &readfds)) {
+        if (FD_ISSET(sock, &readfds)) {
             if (enable_verbose_debugging || localDebug) {
                 fprintf(stderr, "Calling recvfrom\n");
             }
-            received_length = recvfrom(g_visca_sock, buf, sizeof(buf),
+            received_length = recvfrom(sock, buf, sizeof(buf),
                0, NULL, NULL);
             if (enable_verbose_debugging || localDebug) {
                 fprintf(stderr, "Done (len = %llu).\n", (unsigned long long)received_length);
@@ -4026,7 +4031,7 @@ void *runNetworkThread(void *argIgnored) {
     
             continue;
         }
-        if (FD_ISSET(g_visca_sock, &writefds)) {
+        if (FD_ISSET(sock, &writefds)) {
             // This is seriously noisy, so require two flags to enable.
             if (enable_verbose_debugging && localDebug) {
                 fprintf(stderr, "Write set\n");
@@ -4037,7 +4042,7 @@ void *runNetworkThread(void *argIgnored) {
                 if (enable_verbose_debugging || localDebug) {
                     fprintf(stderr, "Sending packet\n");
                 }
-                if (send_visca_packet_raw(g_visca_sock, packet->data, packet->length, packet->isInquiry, packet->sequenceNumber) != -1) {
+                if (send_visca_packet_raw(sock, packet->data, packet->length, packet->isInquiry, packet->sequenceNumber) != -1) {
                     deletePacketFromQueue(packet, g_visca_outdata);
                 }
             } else {
