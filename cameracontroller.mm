@@ -433,6 +433,7 @@ bool g_visca_use_udp = false;
 #else
     pthread_mutex_t g_networkMutex = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER;
     pthread_mutex_t g_motionMutex = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER;
+    pthread_mutex_t g_dnssd_mutex;  // Deferred initializer
 #endif
 
 motionData_t g_motionData;
@@ -442,7 +443,8 @@ motionData_t g_motionData;
     AvahiClient *g_avahi_client = NULL;
     AvahiServiceBrowser *g_avahi_service_browser = NULL;
 #else
-    DNSServiceRef g_browseRef = NULL, g_resolveRef = NULL, g_lookupRef = NULL;
+    DNSServiceRef g_dnssd_browseRef = NULL, g_dnssd_resolveRef = NULL, g_dnssd_lookupRef = NULL;
+    char *g_dnssd_browseContext = NULL;
 #endif
 
 static std::atomic<bool> exit_app(false);
@@ -492,9 +494,19 @@ void sendVISCASavePreset(uint8_t presetNumber, int sock);
 // testing custom VISCA receive code.
 #undef PTZ_TESTING
 
-void connectToVISCAPortWithAddress(const struct sockaddr *address);
+bool connectToVISCAPortWithAddress(const struct sockaddr *address);
 
 int main(int argc, char *argv[]) {
+#if !__linux__
+    // Why does macOS still not provide a static initializer for recursive
+    // mutexes?  This is really nasty.
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&g_dnssd_mutex, &attr);
+    pthread_mutexattr_destroy(&attr);
+#endif
+
     runUnitTests();
 
 #ifdef USE_TFBLIB
@@ -995,14 +1007,52 @@ void *runNDIRunLoop(void *receiver_thread_data_ref) {
                 }
             }
 #else
-            if (g_browseRef != NULL) {
-                DNSServiceProcessResult(g_browseRef);
-            }
-            if (g_resolveRef != NULL) {
-                DNSServiceProcessResult(g_resolveRef);
-            }
-            if (g_lookupRef != NULL) {
-                DNSServiceProcessResult(g_lookupRef);
+            if (enable_visca && !visca_use_custom_ip) {
+                pthread_mutex_lock(&g_dnssd_mutex);
+                fd_set set;
+                FD_ZERO(&set);
+
+                int browsefd = g_dnssd_browseRef == NULL ? -1 : DNSServiceRefSockFD(g_dnssd_browseRef);
+                int resolvefd = g_dnssd_resolveRef == NULL ? -1 : DNSServiceRefSockFD(g_dnssd_resolveRef);
+                int lookupfd = g_dnssd_lookupRef == NULL ? -1 : DNSServiceRefSockFD(g_dnssd_lookupRef);
+
+                pthread_mutex_unlock(&g_dnssd_mutex);
+
+                int maxfd = -1;
+                if (browsefd != -1) {
+                    FD_SET(browsefd, &set); 
+                    maxfd = MAX(maxfd, browsefd);
+                }
+                if (resolvefd != -1) {
+                    FD_SET(resolvefd, &set); 
+                    maxfd = MAX(maxfd, resolvefd);
+                }
+                if (lookupfd != -1) {
+                    FD_SET(lookupfd, &set); 
+                    maxfd = MAX(maxfd, lookupfd);
+                }
+
+                if (maxfd >= 0) {
+                    struct timeval tv = { 0, 1000 };  // 1 ms
+                    if (select(maxfd + 1, &set, NULL, NULL, &tv) > 0) {
+                        pthread_mutex_lock(&g_dnssd_mutex);
+                        int browsefd = g_dnssd_browseRef == NULL ? -1 : DNSServiceRefSockFD(g_dnssd_browseRef);
+                        if (browsefd != -1 && FD_ISSET(browsefd, &set)) {
+                            DNSServiceProcessResult(g_dnssd_browseRef);
+                        }
+
+                        int resolvefd = g_dnssd_resolveRef == NULL ? -1 : DNSServiceRefSockFD(g_dnssd_resolveRef);
+                        if (resolvefd != -1 && FD_ISSET(resolvefd, &set)) {
+                            DNSServiceProcessResult(g_dnssd_resolveRef);
+                        }
+
+                        int lookupfd = g_dnssd_lookupRef == NULL ? -1 : DNSServiceRefSockFD(g_dnssd_lookupRef);
+                        if (lookupfd != -1 && FD_ISSET(lookupfd, &set)) {
+                            DNSServiceProcessResult(g_dnssd_lookupRef);
+                        }
+                        pthread_mutex_unlock(&g_dnssd_mutex);
+                    }
+                }
             }
 #endif
             sendPTZUpdates(pNDI_recv);
@@ -1236,6 +1286,10 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
         return YES;
     }
 
+    void releaseFrameBuffer(void *releaseInfo, void *buffer) {
+        free(buffer);
+    }
+
     bool drawFrame(NDIlib_video_frame_v2_t *video_recv) {
         if (!configureScreen(video_recv)) {
             return false;
@@ -1247,13 +1301,18 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
 
             drawOnScreenLights(datacopy, video_recv->xres, video_recv->yres, 4);
 
-            CGContextRef bitmapBuffer = CGBitmapContextCreateWithData(datacopy, video_recv->xres, video_recv->yres,
-                                                                      8, (video_recv->xres * 4), CGColorSpaceCreateDeviceRGB(),
-                                                                      kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little,
-                                                                      NULL, NULL);
-            CGImageRef imageRef = CGBitmapContextCreateImage(bitmapBuffer);
+            CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+            CGContextRef bitmapContext =
+                CGBitmapContextCreateWithData(datacopy, video_recv->xres, video_recv->yres,
+                                              8, (video_recv->xres * 4),
+colorSpace,
+                                              kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little,
+                                              releaseFrameBuffer, NULL);
+            CGColorSpaceRelease(colorSpace);
+            CGImageRef imageRef = CGBitmapContextCreateImage(bitmapContext);
             NSImage *image = [[NSImage alloc] initWithCGImage:imageRef size:CGSizeMake(video_recv->xres, video_recv->yres)];
             CFRelease(imageRef);
+            CGContextRelease(bitmapContext);
 
             g_mainImageView.image = image;
         });
@@ -1574,11 +1633,7 @@ void avahi_resolve_callback(AvahiServiceResolver *resolver,
 }
 
 void handleDNSResponse(const struct sockaddr *address) {
-    // NewTek's cameras are buggy.  They respond with UDP packets from a different source
-    // port than the port we send to, which makes connected UDP sockets impossible.  This
-    // sucks from a performance perspective, but we work around it by not connecting the
-    // socket.
-    connectToVISCAPortWithAddress(address);
+    (void)connectToVISCAPortWithAddress(address);
 }
 
 #else // ! USE_AVAHI
@@ -1612,14 +1667,30 @@ void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
                                  const char *replyDomain,
                                  void *context);
 
-bool connectVISCA(char *unsafe_stream_name, const char *context) {
-    char *stream_name = NULL;
-    asprintf(&stream_name, "%s", unsafe_stream_name);
+void stopDNSSDResolving(void);
 
-    if (g_browseRef != NULL) {
-        DNSServiceRefDeallocate(g_browseRef);
-        g_browseRef = NULL;
+bool connectVISCA(char *unsafe_stream_name, const char *context) {
+    if (visca_use_custom_ip) {
+        struct sockaddr_in sa;
+        bzero(&sa, sizeof(sa));
+        sa.sin_family = AF_INET;
+        sa.sin_port = 0;
+        sa.sin_addr = g_visca_custom_ip;
+
+        return connectToVISCAPortWithAddress((sockaddr *)&sa);
     }
+
+    // Must dup before stopping resolver, because that could deallocate
+    // this reference if we're unlucky.
+    char *stream_name = strdup(unsafe_stream_name);
+
+    pthread_mutex_lock(&g_dnssd_mutex);
+
+    stopDNSSDResolving();
+
+    // Must set after resolving, or this would be freed.
+    g_dnssd_browseContext = stream_name;
+
     // Start browsing for the service.
     fprintf(stderr, "Starting browser.\n");
 
@@ -1627,7 +1698,7 @@ bool connectVISCA(char *unsafe_stream_name, const char *context) {
     // errno = EPERM (operation not permitted).
     for (int i = 0 ; i < 5; i++) {
         DNSServiceErrorType errorCode =
-            DNSServiceBrowse(&g_browseRef, 0, 0,
+            DNSServiceBrowse(&g_dnssd_browseRef, 0, 0,
                              "_ndi._tcp",
                              NULL,
                              &handleDNSServiceBrowseReply,
@@ -1635,11 +1706,37 @@ bool connectVISCA(char *unsafe_stream_name, const char *context) {
         if (errorCode != kDNSServiceErr_NoError) {
             perror("cameracontroller");
             fprintf(stderr, "Could not start service browser for VISCA (error %d)\n", errorCode);
+            g_dnssd_browseRef = NULL;
         } else {
+            pthread_mutex_unlock(&g_dnssd_mutex);
             return true;
         }
     }
+    pthread_mutex_unlock(&g_dnssd_mutex);
+
     return false;
+}
+
+void stopDNSSDResolving(void) {
+    if (g_dnssd_browseRef) {
+        DNSServiceRefDeallocate(g_dnssd_browseRef);
+        g_dnssd_browseRef = NULL;
+    }
+
+    if (g_dnssd_resolveRef) {
+        DNSServiceRefDeallocate(g_dnssd_resolveRef);
+        g_dnssd_resolveRef = NULL;
+    }
+
+    if (g_dnssd_lookupRef) {
+        DNSServiceRefDeallocate(g_dnssd_lookupRef);
+        g_dnssd_lookupRef = NULL;
+    }
+
+    if (g_dnssd_browseContext != NULL) {
+        free(g_dnssd_browseContext);
+        g_dnssd_browseContext = NULL;
+    }
 }
 
 void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
@@ -1652,41 +1749,37 @@ void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
                                  void *context) {
     if (errorCode) {
         fprintf(stderr, "Service browser for VISCA failed (error %d)\n", errorCode);
-        DNSServiceRefDeallocate(sdRef);
-        free(context);
-        g_browseRef = NULL;
         connectVISCA((char *)context, "3");
         return;
     }
-    if (g_resolveRef != NULL) {
-        DNSServiceRefDeallocate(g_resolveRef);
-        g_resolveRef = NULL;
-    }
     char *stream_name = (char *)context;
     fprintf(stderr, "Got service %s\n", serviceName);
+
+    if (!(flags & kDNSServiceFlagsAdd)) return;
+
     if (source_name_compare(serviceName, stream_name, true)) {
-        fprintf(stderr, "MATCH\n");
-        if (g_resolveRef != NULL) {
-            DNSServiceRefDeallocate(g_browseRef);
-            g_resolveRef = NULL;
-        }
         fprintf(stderr, "Starting resolver.\n");
-        if (DNSServiceResolve(&g_resolveRef, 0, interfaceIndex, serviceName, regtype, replyDomain, &handleDNSServiceResolveReply, context)
-                              != kDNSServiceErr_NoError) {
-            fprintf(stderr, "Could not start service resolver for VISCA (error %d)\n", errorCode);
-            DNSServiceRefDeallocate(sdRef);
-            free(context);
-            g_browseRef = NULL;
+
+        pthread_mutex_lock(&g_dnssd_mutex);
+        if (g_dnssd_resolveRef != NULL) {
+            DNSServiceRefDeallocate(g_dnssd_resolveRef);
+            g_dnssd_resolveRef = NULL;
+        }
+
+        DNSServiceErrorType resolverErrorCode =
+            DNSServiceResolve(&g_dnssd_resolveRef, 0, interfaceIndex, serviceName,
+                              regtype, replyDomain, &handleDNSServiceResolveReply, context);
+        if (resolverErrorCode != kDNSServiceErr_NoError) {
+            fprintf(stderr, "Could not start service resolver for VISCA (error %d)\n", resolverErrorCode);
+            g_dnssd_resolveRef = NULL;
             connectVISCA((char *)context, "4");
+            pthread_mutex_unlock(&g_dnssd_mutex);
             return;
         }
+        pthread_mutex_unlock(&g_dnssd_mutex);
     } else {
         fprintf(stderr, "NOMATCH\n");
     }
-    if (flags & kDNSServiceFlagsMoreComing) { return; }  // Keep browsing until we have a full response.
-    DNSServiceRefDeallocate(sdRef);
-    free(context);
-    g_browseRef = NULL;
 }
 
 void handleDNSServiceResolveReply(DNSServiceRef sdRef,
@@ -1702,28 +1795,24 @@ void handleDNSServiceResolveReply(DNSServiceRef sdRef,
     fprintf(stderr, "VISCA resolved\n");
     if (errorCode) {
         fprintf(stderr, "Service resolver for VISCA failed (error %d)\n", errorCode);
-        DNSServiceRefDeallocate(sdRef);
-        g_resolveRef = NULL;
         connectVISCA((char *)context, "5");
         return;
     }
-    if (g_lookupRef != NULL) {
-        DNSServiceRefDeallocate(g_lookupRef);
-        g_lookupRef = NULL;
+    pthread_mutex_lock(&g_dnssd_mutex);
+    if (g_dnssd_lookupRef != NULL) {
+        DNSServiceRefDeallocate(g_dnssd_lookupRef);
+        g_dnssd_lookupRef = NULL;
     }
-    if (DNSServiceGetAddrInfo(&g_lookupRef, 0, interfaceIndex, kDNSServiceProtocol_IPv4, hosttarget, &handleDNSServiceGetAddrInfoReply, context)
+    if (DNSServiceGetAddrInfo(&g_dnssd_lookupRef, 0, interfaceIndex, kDNSServiceProtocol_IPv4, hosttarget, &handleDNSServiceGetAddrInfoReply, context)
                               != kDNSServiceErr_NoError)
     {
         fprintf(stderr, "Could not start host resolver for VISCA (error %d)\n", errorCode);
-        DNSServiceRefDeallocate(sdRef);
-        g_resolveRef = NULL;
+        g_dnssd_lookupRef = NULL;
         connectVISCA((char *)context, "6");
+        pthread_mutex_unlock(&g_dnssd_mutex);
         return;
     }
-
-    if (flags & kDNSServiceFlagsMoreComing) { return; }  // Keep resolving until we have a full response.
-    DNSServiceRefDeallocate(sdRef);
-    g_resolveRef = NULL;
+    pthread_mutex_unlock(&g_dnssd_mutex);
 }
 
 void handleDNSServiceGetAddrInfoReply(DNSServiceRef sdRef,
@@ -1737,28 +1826,33 @@ void handleDNSServiceGetAddrInfoReply(DNSServiceRef sdRef,
 
     if (errorCode != kDNSServiceErr_NoError) {
         fprintf(stderr, "Service resolver for VISCA failed (error %d)\n", errorCode);
-    } else {
-        connectToVISCAPortWithAddress(address);
-        if (g_visca_sock == -1) {
+    } else if (flags & kDNSServiceFlagsAdd) {
+        bool addressIsValid = connectToVISCAPortWithAddress(address);
+        if (!addressIsValid) {
             fprintf(stderr, "VISCA failed.");
-            if (flags & kDNSServiceFlagsMoreComing) { return; }  // Keep browsing until we have a full response.
+            if (flags & kDNSServiceFlagsMoreComing) {
+                return;
+            }  // Keep browsing until we have a full response.
+            pthread_mutex_lock(&g_dnssd_mutex);
             DNSServiceRefDeallocate(sdRef);
-            g_lookupRef = NULL;
+            g_dnssd_lookupRef = NULL;
+            pthread_mutex_unlock(&g_dnssd_mutex);
             return;
         }
         fprintf(stderr, "VISCA ready.\n");
-    }
 
-    if (flags & kDNSServiceFlagsMoreComing) { return; }  // Keep browsing until we have a full response.
-    DNSServiceRefDeallocate(sdRef);
-    g_lookupRef = NULL;
+        pthread_mutex_lock(&g_dnssd_mutex);
+        stopDNSSDResolving();  // Destroys context
+        pthread_mutex_unlock(&g_dnssd_mutex);
+        return;
+    }
 }
 
 #endif // USE_AVAHI
 
 #pragma mark - VISCA Core
 
-void connectToVISCAPortWithAddress(const struct sockaddr *address) {
+bool connectToVISCAPortWithAddress(const struct sockaddr *address) {
     size_t addr_size = 0;
     if (address->sa_family == AF_INET) {
       addr_size = sizeof(struct sockaddr_in);
@@ -1766,8 +1860,13 @@ void connectToVISCAPortWithAddress(const struct sockaddr *address) {
       addr_size = sizeof(struct sockaddr_in6);
     } else {
       fprintf(stderr, "Ignoring unknown family %d in connectToVISCAPortWithAddress", address->sa_family);
-      return;
+      return false;
     }
+
+    // NewTek's cameras are buggy.  They respond with UDP packets from a different source
+    // port than the port we send to, which makes connected UDP sockets impossible.  This
+    // sucks from a performance perspective, but we work around it by not connecting the
+    // socket.
     struct sockaddr *copiedAddress = (struct sockaddr *)malloc(addr_size);
     memcpy((void *)copiedAddress, (void *)address, addr_size);
 
@@ -1781,6 +1880,7 @@ void connectToVISCAPortWithAddress(const struct sockaddr *address) {
     g_visca_sock = -1;
 
     pthread_mutex_unlock(&g_networkMutex);
+    return true;
 }
 
 int directlyConnectToVISCAPortWithAddress(const struct sockaddr *address) {
