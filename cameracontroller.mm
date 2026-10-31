@@ -1315,6 +1315,9 @@ colorSpace,
             CGContextRelease(bitmapContext);
 
             g_mainImageView.image = image;
+#if !__has_feature(objc_arc)
+            [image release];
+#endif
         });
         return true;
     }
