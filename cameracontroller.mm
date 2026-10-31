@@ -22,6 +22,8 @@
 
 #include <pthread.h>
 
+#include <Block.h>
+
 #define NSEC_PER_SEC 1000000000 
 
 extern "C" {
