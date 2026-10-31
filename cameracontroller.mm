@@ -3958,6 +3958,7 @@ void debug_response_handlers(const char *context) {
 
 void add_response_handler(packetResponseHandler handler) {
   response_handler_queue_item_t item = (response_handler_queue_item_t)malloc(sizeof(*item));
+  memset(item, 0, sizeof(*item));
   item->handlerBlock = handler;
 
   pthread_mutex_lock(&g_networkMutex);
