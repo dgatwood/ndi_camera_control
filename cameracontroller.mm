@@ -2688,9 +2688,9 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
     };
 
 #if __has_feature(objc_arc)
-    add_response_handler(Block_copy(handler));
+    add_response_handler(handler);
 #else
-     add_response_handler(handler);
+    add_response_handler(Block_copy(handler));
 #endif
 
     struct timespec abs_timeout;    
