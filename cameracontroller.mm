@@ -2687,7 +2687,11 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
         return true;
     };
 
-    add_response_handler(handler);
+#if __has_feature(objc_arc)
+    add_response_handler(Block_copy(handler));
+#else
+     add_response_handler(handler);
+#endif
 
     struct timespec abs_timeout;    
     clock_gettime(CLOCK_REALTIME, &abs_timeout);
@@ -3995,6 +3999,11 @@ void remove_response_handler_item(response_handler_queue_item_t handler) {
   } else {
     g_response_handler_queue = handler->next;
   }
+#if __has_feature(objc_arc)
+  handler->handlerBlock = NULL;
+#else
+  Block_release(handler->handlerBlock);
+#endif
   free(handler);
 }
 
