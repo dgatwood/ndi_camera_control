@@ -20,6 +20,10 @@
 #include <sys/param.h>
 #include <dlfcn.h>
 
+#if !__has_feature(objc_arc)
+#include <Block.h>
+#endif
+
 #include <pthread.h>
 
 #include <Block.h>
@@ -45,6 +49,42 @@ extern "C" {
 #undef ENABLE_PAN_TILT_SPEED_COMPENSATION
 #define GO_SLOW 0
 
+
+#if 0
+#define DB_pthread_cond_signal(COND) { \
+    fprintf(stderr, "pthread_cond_signal(%s)\n", #COND); \
+    pthread_cond_signal(COND); \
+}
+#define DB_pthread_cond_timedwait(COND, MUTEX, TIMEOUT) \
+    DB_pthread_cond_timedwait_wrapper(#COND, #MUTEX, #TIMEOUT, COND, MUTEX, TIMEOUT)
+
+static inline int
+    DB_pthread_cond_timedwait_wrapper(const char *condString,
+                                      const char *mutexString,
+                                      const char *timeoutString,
+                                      pthread_cond_t *cond,
+                                      pthread_mutex_t *mutex,
+                                      const struct timespec *timeout) {
+    fprintf(stderr, "pthread_cond_timedwait(%s, %s, %s)\n", condString, mutexString, timeoutString);
+    return pthread_cond_timedwait(cond, mutex, timeout);
+}
+
+#define DB_pthread_mutex_lock(LOCK) { \
+    fprintf(stderr, "pthread_mutex_lock(%s)\n", #LOCK); \
+    pthread_mutex_lock(LOCK); \
+}
+
+#define DB_pthread_mutex_unlock(LOCK) { \
+    fprintf(stderr, "pthread_mutex_unlock(%s)\n", #LOCK); \
+    pthread_mutex_unlock(LOCK); \
+}
+
+#else
+#define DB_pthread_cond_signal pthread_cond_signal
+#define DB_pthread_cond_timedwait pthread_cond_timedwait
+#define DB_pthread_mutex_lock pthread_mutex_lock
+#define DB_pthread_mutex_unlock pthread_mutex_unlock
+#endif
 
 #define PACKET_TIMEOUT 1000  /* 1 msec */
 #define VISCA_ACK_TIMEOUT 200000  /* 200 milliseconds */
@@ -172,7 +212,10 @@ bool use_visca_for_presets = false;
 
 double gCurrentPanPosition = 0;   // Only valid if VISCA is enabled.
 double gCurrentTiltPosition = 0;  // Only valid if VISCA is enabled.
+#ifdef ENABLE_PAN_TILT_SPEED_COMPENSATION
 double gCurrentZoomPosition = 0;  // Only valid if VISCA is enabled.
+#endif
+
 int gMaxZoomValue = 8;
 int gMaxPanTiltValue = 0;  // Default is normal VISCA commands.
 
@@ -283,13 +326,17 @@ enum {
 
     int g_pig;
 
-    int g_framebufferXRes = 0, g_framebufferYRes = 0, g_NDIXRes = 0, g_NDIYRes = 0;
+    int g_framebufferXRes = 0, g_framebufferYRes = 0;
     double g_xScaleFactor = 0.0, g_yScaleFactor = 0.0;
+
+    void cleanupFrameBuffer(void);
 
 #else  // ! __linux__
     NSWindow *g_mainWindow = nil;
     NSImageView *g_mainImageView = nil;
 #endif  // __linux__
+
+int g_NDIXRes = 0, g_NDIYRes = 0;
 
 receiver_array_item_t g_shown_sources = NULL;
 receiver_array_item_t g_active_receivers = NULL;
@@ -691,7 +738,7 @@ int main(int argc, char *argv[]) {
                 g_manual_gain = 0;
                 g_set_manual_gain = false;
             } else {
-                fprintf(stderr, "Set manual iris to %d.\n", g_manual_gain);
+                fprintf(stderr, "Set manual gain to %d.\n", g_manual_gain);
             }
         }
 
@@ -706,7 +753,7 @@ int main(int argc, char *argv[]) {
                 g_manual_shutter = 0;
                 g_set_manual_shutter = false;
             } else {
-                fprintf(stderr, "Set manual iris to %d.\n", g_manual_shutter);
+                fprintf(stderr, "Set manual shutter to %d.\n", g_manual_shutter);
             }
         }
 #endif  // USE_VISCA_FOR_EXPOSURE_COMPENSATION
@@ -859,10 +906,10 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
                             g_active_receivers = receiver_item;
                             fprintf(stderr, "Connected.\n");
                             if (g_visca_sock != -1) {
-                                pthread_mutex_lock(&g_networkMutex);
+                                DB_pthread_mutex_lock(&g_networkMutex);
                                 close(g_visca_sock);
                                 g_visca_sock = -1;
-                                pthread_mutex_unlock(&g_networkMutex);
+                                DB_pthread_mutex_unlock(&g_networkMutex);
                             }
                             if (enable_visca) {
                                 visca_running = connectVISCA(stream_name, "1");
@@ -924,7 +971,9 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
         // Clean up the library as a whole.
         p_NDILib->NDIlib_destroy();
 
-#ifndef __linux__
+#ifdef __linux__
+        cleanupFrameBuffer();
+#else
         dispatch_async(dispatch_get_main_queue(), ^{
             CFRunLoopStop(CFRunLoopGetMain());
         });
@@ -994,23 +1043,25 @@ void *runNDIRunLoop(void *receiver_thread_data_ref) {
 #ifdef USE_AVAHI
             if (enable_visca && !visca_use_custom_ip) {
                 int avahi_error = -1;
-                pthread_mutex_lock(&g_avahiMutex);
+                DB_pthread_mutex_lock(&g_avahiMutex);
                 if (g_avahi_simple_poll != NULL) {
                     avahi_error = avahi_simple_poll_iterate(g_avahi_simple_poll, 0);
                 }
-                pthread_mutex_unlock(&g_avahiMutex);
+                DB_pthread_mutex_unlock(&g_avahiMutex);
                 if (avahi_error != 0) {
+                    stream_name = strdup(stream_name);
                     // Something went horribly wrong.  Just null out the references and start over.
                     g_avahi_simple_poll = NULL;
                     g_avahi_client = NULL;
                     g_avahi_service_browser = NULL;
 
                     visca_running = connectVISCA(stream_name, "2");
+                    free(stream_name);
                 }
             }
 #else
             if (enable_visca && !visca_use_custom_ip) {
-                pthread_mutex_lock(&g_dnssd_mutex);
+                DB_pthread_mutex_lock(&g_dnssd_mutex);
                 fd_set set;
                 FD_ZERO(&set);
 
@@ -1018,7 +1069,7 @@ void *runNDIRunLoop(void *receiver_thread_data_ref) {
                 int resolvefd = g_dnssd_resolveRef == NULL ? -1 : DNSServiceRefSockFD(g_dnssd_resolveRef);
                 int lookupfd = g_dnssd_lookupRef == NULL ? -1 : DNSServiceRefSockFD(g_dnssd_lookupRef);
 
-                pthread_mutex_unlock(&g_dnssd_mutex);
+                DB_pthread_mutex_unlock(&g_dnssd_mutex);
 
                 int maxfd = -1;
                 if (browsefd != -1) {
@@ -1037,7 +1088,7 @@ void *runNDIRunLoop(void *receiver_thread_data_ref) {
                 if (maxfd >= 0) {
                     struct timeval tv = { 0, 1000 };  // 1 ms
                     if (select(maxfd + 1, &set, NULL, NULL, &tv) > 0) {
-                        pthread_mutex_lock(&g_dnssd_mutex);
+                        DB_pthread_mutex_lock(&g_dnssd_mutex);
                         int browsefd = g_dnssd_browseRef == NULL ? -1 : DNSServiceRefSockFD(g_dnssd_browseRef);
                         if (browsefd != -1 && FD_ISSET(browsefd, &set)) {
                             DNSServiceProcessResult(g_dnssd_browseRef);
@@ -1052,7 +1103,7 @@ void *runNDIRunLoop(void *receiver_thread_data_ref) {
                         if (lookupfd != -1 && FD_ISSET(lookupfd, &set)) {
                             DNSServiceProcessResult(g_dnssd_lookupRef);
                         }
-                        pthread_mutex_unlock(&g_dnssd_mutex);
+                        DB_pthread_mutex_unlock(&g_dnssd_mutex);
                     }
                 }
             }
@@ -1069,37 +1120,47 @@ void *runNDIRunLoop(void *receiver_thread_data_ref) {
 }
 
 bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
-    static bool configured = false;
-    if (configured) return true;
-    configured = true;
+    // Ignore invalid screen dimensions.
+    if (video_recv->xres == 0 || video_recv->yres == 0) {
+        return false;
+    }
+
+    // Nothing to do.
+    if (g_NDIXRes == video_recv->xres && g_NDIYRes == video_recv->yres) {
+        return true;
+    }
 
 #ifdef __linux__
     // Read the current framebuffer settings so that we can restore them later.
     int framebufferMemoryOffset = 0;
     int zero = 0;
-    g_framebufferFileHandle = open("/dev/fb0", O_RDWR);
     if (g_framebufferFileHandle == -1) {
-        perror("cameracontroller: open");
-        goto fail;
-    }
-    if (ioctl(g_framebufferFileHandle, FBIOGET_VSCREENINFO, &g_initialFramebufferConfiguration) == -1) {
-        perror("cameracontroller: FBIOGET_VSCREENINFO");
-        goto fail;
-    }
-    if (ioctl(g_framebufferFileHandle, FBIOGET_FSCREENINFO, &g_framebufferFixedConfiguration) == -1) {
-        perror("cameracontroller: FBIOGET_FSCREENINFO");
-        goto fail;
+        g_framebufferFileHandle = open("/dev/fb0", O_RDWR);
+        if (g_framebufferFileHandle == -1) {
+            perror("cameracontroller: open");
+            goto fail;
+        }
+        if (ioctl(g_framebufferFileHandle, FBIOGET_VSCREENINFO, &g_initialFramebufferConfiguration) == -1) {
+            perror("cameracontroller: FBIOGET_VSCREENINFO");
+            goto fail;
+        }
+        if (ioctl(g_framebufferFileHandle, FBIOGET_FSCREENINFO, &g_framebufferFixedConfiguration) == -1) {
+            perror("cameracontroller: FBIOGET_FSCREENINFO");
+            goto fail;
+        }
     }
     if (g_framebufferFixedConfiguration.type != FB_TYPE_PACKED_PIXELS) {
         fprintf(stderr, "Error: Only packed pixel framebuffers are supported.\n");
         goto fail;
     }
 
-    framebufferMemoryOffset = (unsigned long)(g_framebufferFixedConfiguration.smem_start) & (~PAGE_MASK);
-    g_framebufferMemory = (unsigned char *)mmap(NULL, g_framebufferFixedConfiguration.smem_len + framebufferMemoryOffset, PROT_READ | PROT_WRITE, MAP_SHARED, g_framebufferFileHandle, 0);
-    if ((long)g_framebufferMemory == -1L) {
-        perror("cameracontroller: mmap");
-        goto fail;
+    if (g_framebufferMemory == NULL) {
+        framebufferMemoryOffset = (unsigned long)(g_framebufferFixedConfiguration.smem_start) & (~PAGE_MASK);
+        g_framebufferMemory = (unsigned char *)mmap(NULL, g_framebufferFixedConfiguration.smem_len + framebufferMemoryOffset, PROT_READ | PROT_WRITE, MAP_SHARED, g_framebufferFileHandle, 0);
+        if ((long)g_framebufferMemory == -1L) {
+            perror("cameracontroller: mmap");
+            goto fail;
+        }
     }
 
     g_framebufferActiveConfiguration = g_initialFramebufferConfiguration;
@@ -1130,12 +1191,16 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
     return true;
 
   fail:
+    g_NDIXRes = 0;
+    g_NDIYRes = 0;
     if (ioctl(g_framebufferFileHandle, FBIOPUT_VSCREENINFO, &g_initialFramebufferConfiguration) == -1) {
         perror("cameracontroller: FBIOPUT_VSCREENINFO");
     }
     if (ioctl(g_framebufferFileHandle, FBIOGET_FSCREENINFO, &g_framebufferFixedConfiguration) == -1) {
         perror("cameracontroller: FBIOGET_FSCREENINFO");
     }
+    close(g_framebufferFileHandle);
+    g_framebufferFileHandle = -1;
     return false;
 
 #else  // ! __linux__
@@ -1152,6 +1217,9 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
         [g_mainWindow makeKeyAndOrderFront:g_mainWindow];
     });
 
+    g_NDIXRes = video_recv->xres;
+    g_NDIYRes = video_recv->yres;
+
     return true;
 #endif
 }
@@ -1163,7 +1231,7 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
         uint8_t r = (sample >> 16) & 0xff;
         uint8_t g = (sample >>  8) & 0xff;
         uint8_t b = (sample >>  0) & 0xff;
-        return ((r >> 3) << 11) | ((g >> 2) << 5) | (g >> 3);
+        return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
 
     }
 
@@ -1256,6 +1324,7 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
     }
 
     void cleanupFrameBuffer(void) {
+
         if (ioctl(g_framebufferFileHandle, FBIOPUT_VSCREENINFO, &g_initialFramebufferConfiguration) == -1) {
             fprintf(stderr, "Ioctl FBIOPUT_VSCREENINFO error.\n");
         }
@@ -1471,7 +1540,7 @@ void avahi_browse_callback(AvahiServiceBrowser *browser,
                            void *userdata);
 void handleDNSResponse(const struct sockaddr *address);
 
-bool connectVISCA(char *stream_name, const char *context) {
+bool connectVISCA(char *unsafe_stream_name, const char *context) {
     fprintf(stderr, "Called connectVISCA in context %s\n", context);
     if (visca_use_custom_ip) {
         struct sockaddr_in sa;
@@ -1483,7 +1552,8 @@ bool connectVISCA(char *stream_name, const char *context) {
         return true;
     }
 
-    pthread_mutex_lock(&g_avahiMutex);
+    char *stream_name = strdup(unsafe_stream_name);
+    DB_pthread_mutex_lock(&g_avahiMutex);
 
     AvahiSimplePoll *avahi_simple_poll = g_avahi_simple_poll;
     AvahiClient *avahi_client = g_avahi_client;
@@ -1492,7 +1562,7 @@ bool connectVISCA(char *stream_name, const char *context) {
     if (!avahi_simple_poll) {
         if (!(avahi_simple_poll = avahi_simple_poll_new())) {
             fprintf(stderr, "Failed to create Avahi run loop.\n");
-            pthread_mutex_unlock(&g_avahiMutex);
+            DB_pthread_mutex_unlock(&g_avahiMutex);
             return false;
         }
     }
@@ -1502,7 +1572,8 @@ bool connectVISCA(char *stream_name, const char *context) {
         if (!poll) {
             fprintf(stderr, "Avahi poll is broken.\n");
             avahi_simple_poll_free(avahi_simple_poll);
-            pthread_mutex_unlock(&g_avahiMutex);
+            g_avahi_simple_poll = NULL;
+            DB_pthread_mutex_unlock(&g_avahiMutex);
             return false;
         }
         avahi_client = avahi_client_new(poll,
@@ -1513,7 +1584,8 @@ bool connectVISCA(char *stream_name, const char *context) {
         if (!avahi_client) {
             fprintf(stderr, "Failed to create Avahi client (error %d).\n", error);
             avahi_simple_poll_free(avahi_simple_poll);
-            pthread_mutex_unlock(&g_avahiMutex);
+            g_avahi_simple_poll = NULL;
+            DB_pthread_mutex_unlock(&g_avahiMutex);
             return false;
         }
     }
@@ -1529,8 +1601,11 @@ bool connectVISCA(char *stream_name, const char *context) {
         fprintf(stderr, "Failed to create service browser: %s\n",
                 avahi_strerror(avahi_client_errno(avahi_client)));
         avahi_client_free(avahi_client);
+        g_avahi_client = NULL;
         avahi_simple_poll_free(avahi_simple_poll);
-        pthread_mutex_unlock(&g_avahiMutex);
+        g_avahi_simple_poll = NULL;
+        g_avahi_service_browser = NULL;
+        DB_pthread_mutex_unlock(&g_avahiMutex);
         return false;
     }
 
@@ -1542,7 +1617,7 @@ bool connectVISCA(char *stream_name, const char *context) {
     }
     g_avahi_service_browser = avahi_service_browser;
 
-    pthread_mutex_unlock(&g_avahiMutex);
+    DB_pthread_mutex_unlock(&g_avahiMutex);
     return true;
 }
 
@@ -1689,7 +1764,7 @@ bool connectVISCA(char *unsafe_stream_name, const char *context) {
     // this reference if we're unlucky.
     char *stream_name = strdup(unsafe_stream_name);
 
-    pthread_mutex_lock(&g_dnssd_mutex);
+    DB_pthread_mutex_lock(&g_dnssd_mutex);
 
     stopDNSSDResolving();
 
@@ -1713,11 +1788,11 @@ bool connectVISCA(char *unsafe_stream_name, const char *context) {
             fprintf(stderr, "Could not start service browser for VISCA (error %d)\n", errorCode);
             g_dnssd_browseRef = NULL;
         } else {
-            pthread_mutex_unlock(&g_dnssd_mutex);
+            DB_pthread_mutex_unlock(&g_dnssd_mutex);
             return true;
         }
     }
-    pthread_mutex_unlock(&g_dnssd_mutex);
+    DB_pthread_mutex_unlock(&g_dnssd_mutex);
 
     return false;
 }
@@ -1765,7 +1840,7 @@ void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
     if (source_name_compare(serviceName, stream_name, true)) {
         fprintf(stderr, "Starting resolver.\n");
 
-        pthread_mutex_lock(&g_dnssd_mutex);
+        DB_pthread_mutex_lock(&g_dnssd_mutex);
         if (g_dnssd_resolveRef != NULL) {
             DNSServiceRefDeallocate(g_dnssd_resolveRef);
             g_dnssd_resolveRef = NULL;
@@ -1778,10 +1853,10 @@ void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
             fprintf(stderr, "Could not start service resolver for VISCA (error %d)\n", resolverErrorCode);
             g_dnssd_resolveRef = NULL;
             connectVISCA((char *)context, "4");
-            pthread_mutex_unlock(&g_dnssd_mutex);
+            DB_pthread_mutex_unlock(&g_dnssd_mutex);
             return;
         }
-        pthread_mutex_unlock(&g_dnssd_mutex);
+        DB_pthread_mutex_unlock(&g_dnssd_mutex);
     } else {
         fprintf(stderr, "NOMATCH\n");
     }
@@ -1803,7 +1878,7 @@ void handleDNSServiceResolveReply(DNSServiceRef sdRef,
         connectVISCA((char *)context, "5");
         return;
     }
-    pthread_mutex_lock(&g_dnssd_mutex);
+    DB_pthread_mutex_lock(&g_dnssd_mutex);
     if (g_dnssd_lookupRef != NULL) {
         DNSServiceRefDeallocate(g_dnssd_lookupRef);
         g_dnssd_lookupRef = NULL;
@@ -1814,10 +1889,10 @@ void handleDNSServiceResolveReply(DNSServiceRef sdRef,
         fprintf(stderr, "Could not start host resolver for VISCA (error %d)\n", errorCode);
         g_dnssd_lookupRef = NULL;
         connectVISCA((char *)context, "6");
-        pthread_mutex_unlock(&g_dnssd_mutex);
+        DB_pthread_mutex_unlock(&g_dnssd_mutex);
         return;
     }
-    pthread_mutex_unlock(&g_dnssd_mutex);
+    DB_pthread_mutex_unlock(&g_dnssd_mutex);
 }
 
 void handleDNSServiceGetAddrInfoReply(DNSServiceRef sdRef,
@@ -1838,17 +1913,17 @@ void handleDNSServiceGetAddrInfoReply(DNSServiceRef sdRef,
             if (flags & kDNSServiceFlagsMoreComing) {
                 return;
             }  // Keep browsing until we have a full response.
-            pthread_mutex_lock(&g_dnssd_mutex);
+            DB_pthread_mutex_lock(&g_dnssd_mutex);
             DNSServiceRefDeallocate(sdRef);
             g_dnssd_lookupRef = NULL;
-            pthread_mutex_unlock(&g_dnssd_mutex);
+            DB_pthread_mutex_unlock(&g_dnssd_mutex);
             return;
         }
         fprintf(stderr, "VISCA ready.\n");
 
-        pthread_mutex_lock(&g_dnssd_mutex);
+        DB_pthread_mutex_lock(&g_dnssd_mutex);
         stopDNSSDResolving();  // Destroys context
-        pthread_mutex_unlock(&g_dnssd_mutex);
+        DB_pthread_mutex_unlock(&g_dnssd_mutex);
         return;
     }
 }
@@ -1875,7 +1950,7 @@ bool connectToVISCAPortWithAddress(const struct sockaddr *address) {
     struct sockaddr *copiedAddress = (struct sockaddr *)malloc(addr_size);
     memcpy((void *)copiedAddress, (void *)address, addr_size);
 
-    pthread_mutex_lock(&g_networkMutex);
+    DB_pthread_mutex_lock(&g_networkMutex);
 
     struct sockaddr *oldAddress = g_visca_sockaddr;
     g_visca_sockaddr = copiedAddress;
@@ -1884,7 +1959,7 @@ bool connectToVISCAPortWithAddress(const struct sockaddr *address) {
     close(g_visca_sock);
     g_visca_sock = -1;
 
-    pthread_mutex_unlock(&g_networkMutex);
+    DB_pthread_mutex_unlock(&g_networkMutex);
     return true;
 }
 
@@ -1937,8 +2012,10 @@ int directlyConnectToVISCAPortWithAddress(const struct sockaddr *address) {
 
 void updateVISCAMaxSpeed(int sock);
 void updateTallyLightsOverVISCA(int sock);
+#if 0
 void updateZoomPositionOverVISCA(int sock);
 bool updateZoomPositionOverVISCA(int sock, bool digitalMode);
+#endif
 void sendZoomUpdatesOverVISCA(int sock, motionData_t *motionData);
 #if GO_SLOW
 void sendPanTiltSpeedOverVISCA(int sock, motionData_t *motionData);
@@ -1948,9 +2025,13 @@ void sendExposureCompensationOverVISCA(int sock);
 void sendManualExposureOverVISCA(int sock);
 
 void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
+    static motionData_t lastMotionData = { 0.0, 0.0, 0.0, 0, 0 };
+
     updateVISCAMaxSpeed(g_visca_sock);
     updateTallyLightsOverVISCA(g_visca_sock);
+#if 0
     updateZoomPositionOverVISCA(g_visca_sock);
+#endif
     if (enable_visca_ptz) {
 #if GO_SLOW
         sendPanTiltSpeedOverVISCA(g_visca_sock, motionData);
@@ -1961,6 +2042,20 @@ void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
         sendExposureCompensationOverVISCA(g_visca_sock);
         sendManualExposureOverVISCA(g_visca_sock);
 #endif
+    }
+
+    if (g_visca_sock != -1 && use_visca_for_presets) {
+        if (motionData->retrievePositionNumber > 0 &&
+            motionData->retrievePositionNumber != lastMotionData.retrievePositionNumber) {
+            fprintf(stderr, "Retrieving position %d\n", motionData->retrievePositionNumber);
+            g_is_loading_preset = true;
+            sendVISCALoadPreset(motionData->retrievePositionNumber, g_visca_sock);
+        } else if (motionData->storePositionNumber > 0 &&
+                   motionData->storePositionNumber != lastMotionData.storePositionNumber) {
+            fprintf(stderr, "Storing position %d\n", motionData->storePositionNumber);
+            sendVISCASavePreset(motionData->storePositionNumber, g_visca_sock);
+        }
+        lastMotionData = *motionData;
     }
 }
 
@@ -1982,6 +2077,9 @@ void updateVISCAMaxSpeed(int sock) {
     // This should never change, but we need to keep trying until we get a valid result, and it
     // isn't worth stopping the polling after we do.
     if ((curTime.tv_sec - lastCheck.tv_sec) < 5) return;
+
+    // No point in trying if the socket is bogus.
+    if (sock == -1) return;
 
     lastCheck = curTime;
 
@@ -2106,6 +2204,7 @@ void updatePanTiltPositionOverVISCA(int sock) {
     free(responseBuf);
 }
 
+#ifdef ENABLE_PAN_TILT_SPEED_COMPENSATION
 void updateZoomPositionOverVISCA(int sock) {
   static bool useDigitalMode = false;
 
@@ -2218,6 +2317,7 @@ bool updateZoomPositionOverVISCA(int sock, bool digitalMode) {
     }
     return !failed;
 }
+#endif
 
 void updateTallyLightsOverVISCA(int sock) {
     static struct timeval lastCheck = { 0, 0 };
@@ -2545,7 +2645,7 @@ void sendExposureCompensationOverVISCA(int sock) {
     }
 }
 
-bool get_ack(int sock, int timeout_usec);
+bool get_ack(int sock, uint32_t sequence_number, int timeout_usec);
 
 ssize_t get_expected_response_length(uint8_t *buf, ssize_t bufsize) {
   bool valid = (bufsize > 2 && buf[0] == 0x81 && buf[1] == 0x09 && buf[bufsize - 1] == 0xFF);
@@ -2574,6 +2674,7 @@ ssize_t get_expected_response_length(uint8_t *buf, ssize_t bufsize) {
             return 4;
           }
         }
+        break;
       case 7: /* Queries of length 7 */
         if (buf[2] == 0x7E && buf[3] == 0x01 && buf[4] == 0x0A && buf[5] == 0x01) {
           return 4;
@@ -2600,7 +2701,9 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
 
     int expectedLength = get_expected_response_length(buf, bufsize);
 
+    __block pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
     __block pthread_cond_t semaphore = PTHREAD_COND_INITIALIZER;
+    __block bool ready = false;
 
     __block ssize_t localResponseLength = 0;
     __block uint8_t *responseBuf = NULL;
@@ -2608,6 +2711,8 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
 
     packetResponseHandler handler = ^(visca_network_packet_t packet) {
         int udp_offset = g_visca_use_udp ? 8 : 0;
+
+        if (packet->length < udp_offset) return false;
 
         if (enable_verbose_debugging) {
           fprintf(stderr, "In packetResponseHandler %s\n", fmtbuf(packet->data, packet->length));
@@ -2680,19 +2785,23 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
           localResponseLength = packet->length - udp_offset;
           responseBuf = (uint8_t *)malloc(localResponseLength);
           bcopy(blockResponse + udp_offset, responseBuf, localResponseLength);
+          ready = true;
         }
 
         if (localDebug) {
           fprintf(stderr, "pthread_cond_signal\n");
         }
-        pthread_cond_signal(&semaphore);
+        DB_pthread_mutex_lock(&mutex);
+        DB_pthread_cond_signal(&semaphore);
+        DB_pthread_mutex_unlock(&mutex);
         return true;
     };
 
 #if __has_feature(objc_arc)
     add_response_handler(handler);
 #else
-    add_response_handler(Block_copy(handler));
+    handler = Block_copy(handler);
+    add_response_handler(handler);
 #endif
 
     struct timespec abs_timeout;    
@@ -2710,22 +2819,26 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
       if (localDebug) {
         fprintf(stderr, "pthread_cond_timedwait\n");
       }
-      pthread_mutex_t junk_mutex = PTHREAD_MUTEX_INITIALIZER;
-      pthread_mutex_lock(&junk_mutex);
-      if (pthread_cond_timedwait(&semaphore, &junk_mutex, &abs_timeout) != 0) {
+      DB_pthread_mutex_lock(&mutex);
+      if (!ready && DB_pthread_cond_timedwait(&semaphore, &mutex, &abs_timeout) != 0) {
         if (localDebug) {
           fprintf(stderr, "Read timeout.\n");
         }
+        DB_pthread_mutex_unlock(&mutex);
 
         // Ensure that it doesn't get called and signal a dead semaphore.
         remove_response_handler(handler);
 
         *responseLength = 0;
         debug_response_handlers("Inquiry return[1]");
+
+        pthread_mutex_destroy(&mutex);
+        pthread_cond_destroy(&semaphore);
+
         return NULL;
       }
-      pthread_mutex_unlock(&junk_mutex);
-      pthread_mutex_destroy(&junk_mutex);
+      DB_pthread_mutex_unlock(&mutex);
+      pthread_mutex_destroy(&mutex);
       if (localDebug) {
         fprintf(stderr, "pthread_cond_timedwait done\n");
       }
@@ -2750,10 +2863,10 @@ int send_visca_packet(int sock, uint8_t *buf, ssize_t bufsize, int timeout_usec,
     uint8_t *copiedBuffer = (uint8_t *)malloc(bufsize);
     bcopy(buf, copiedBuffer, bufsize);
 
-    pthread_mutex_lock(&g_networkMutex);
+    DB_pthread_mutex_lock(&g_networkMutex);
     static uint32_t visca_sequence_number = 0;
     uint32_t sequenceNumber = visca_sequence_number++;
-    pthread_mutex_unlock(&g_networkMutex);
+    DB_pthread_mutex_unlock(&g_networkMutex);
 
     if (outSequenceNumber != NULL) {
       *outSequenceNumber = sequenceNumber;
@@ -2766,7 +2879,7 @@ int send_visca_packet(int sock, uint8_t *buf, ssize_t bufsize, int timeout_usec,
         return 0;
     }
 
-    if (get_ack(sock, timeout_usec)) {
+    if (get_ack(sock, sequenceNumber, timeout_usec)) {
         return 0;
     } else {
         if (enable_verbose_debugging) {
@@ -2794,12 +2907,14 @@ int send_visca_packet_raw(int sock, uint8_t *buf, ssize_t bufsize, bool isInquir
         if (sendto(sock, udpbuf, udpbufsize, 0,
                (sockaddr *)&g_visca_addr, sizeof(struct sockaddr_in)) != udpbufsize) {
             perror("write failed.");
+            free(udpbuf);
             return -1;
         }
 
         if (enable_verbose_debugging) {
             fprintf(stderr, "Sent %s\n", fmtbuf(udpbuf, bufsize + 8));
         }
+        free(udpbuf);
     } else {
         if (write(sock, buf, bufsize) != bufsize) {
             perror("write failed.");
@@ -2809,7 +2924,7 @@ int send_visca_packet_raw(int sock, uint8_t *buf, ssize_t bufsize, bool isInquir
     return 0;
 }
 
-bool get_ack(int sock, int timeout_usec) {
+bool get_ack(int sock, uint32_t sequence_number, int timeout_usec) {
     bool localDebug = enable_verbose_debugging || false;
     int udp_offset = g_visca_use_udp ? 8 : 0;
     if (enable_verbose_debugging) {
@@ -2822,20 +2937,21 @@ bool get_ack(int sock, int timeout_usec) {
     // IMPORTANT: Take and release the lock inside this loop to avoid blocking
     // the network thread.
     bool found_5 = false, found_4 = false;
-    while (getVISCATimestamp() < startTime + 0.2 && !found_5) {
-        pthread_mutex_lock(&g_networkMutex);
+    while (getVISCATimestamp() < startTime + ((double)timeout_usec / 1000000.0) && !found_5) {
+        DB_pthread_mutex_lock(&g_networkMutex);
         visca_network_packet_t packet = g_visca_indata->head;
         int ack_type = -1;
 
         while (packet && !(found_4 && found_5)) {
+            bool matches = (packet->sequenceNumber == sequence_number) || !g_visca_use_udp;
             ack_type = ackType(packet);
-            if (ack_type == 5 && !found_5) {
+            if (matches && ack_type == 5 && !found_5) {
                 found_5 = true;
                 if (enable_verbose_debugging) {
                     fprintf(stderr, "DEQUEUE ACK 5 %s\n", fmtbuf(packet->data, packet->length));
                 }
                 packet = deletePacketFromQueue(packet, g_visca_indata);
-            } else if (ack_type == 4 && !found_4) {
+            } else if (matches && ack_type == 4 && !found_4) {
                 found_4 = true;
                 if (enable_verbose_debugging) {
                     fprintf(stderr, "DEQUEUE ACK 4 %s\n", fmtbuf(packet->data, packet->length));
@@ -2846,7 +2962,7 @@ bool get_ack(int sock, int timeout_usec) {
             }
         }
 
-        pthread_mutex_unlock(&g_networkMutex);
+        DB_pthread_mutex_unlock(&g_networkMutex);
     }
 
     return found_5;
@@ -2919,18 +3035,14 @@ void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
     if (copyOfMotionData.retrievePositionNumber > 0 &&
         copyOfMotionData.retrievePositionNumber != lastMotionData.retrievePositionNumber) {
         fprintf(stderr, "Retrieving position %d\n", copyOfMotionData.retrievePositionNumber);
-        g_is_loading_preset = true;
-        if (use_visca_for_presets) {
-            sendVISCALoadPreset((uint8_t)copyOfMotionData.retrievePositionNumber, g_visca_sock);
-        } else {
+        if (!use_visca_for_presets) {
+            g_is_loading_preset = true;
             NDIlib_recv_ptz_recall_preset(pNDI_recv, copyOfMotionData.retrievePositionNumber, recallSpeedNDI());
         }
     } else if (copyOfMotionData.storePositionNumber > 0 &&
                copyOfMotionData.storePositionNumber != lastMotionData.storePositionNumber) {
         fprintf(stderr, "Storing position %d\n", copyOfMotionData.storePositionNumber);
-        if (use_visca_for_presets) {
-            sendVISCASavePreset((uint8_t)copyOfMotionData.storePositionNumber, g_visca_sock);
-        } else {
+        if (!use_visca_for_presets) {
             NDIlib_recv_ptz_store_preset(pNDI_recv, copyOfMotionData.storePositionNumber);
         }
     }
@@ -3267,9 +3379,7 @@ void updateLights(motionData_t *motionData) {
 
     struct timespec current_wallclock_time;
     clock_gettime(CLOCK_REALTIME, &current_wallclock_time);
-    // Add at most a second if the seconds are different.  If we've lost more than a second of video,
-    // things aren't working anyway.
-    uint64_t diff = ((current_wallclock_time.tv_sec != last_frame_time.tv_sec) ? 1000000000 : 0) +
+    uint64_t diff = ((current_wallclock_time.tv_sec - last_frame_time.tv_sec) * 1000000000ULL) +
         current_wallclock_time.tv_nsec - last_frame_time.tv_nsec;
 
     g_camera_malfunctioning = diff > 100000000;  // Scream after losing 3 frames.
@@ -3407,9 +3517,9 @@ void setMotionData(motionData_t newMotionData) {
      * Lock the motion data mutex and update the motion data so that the NDI code
      * running on the main thread can send it to the camera.
      */
-    pthread_mutex_lock(&g_motionMutex);
+    DB_pthread_mutex_lock(&g_motionMutex);
     g_motionData = newMotionData;
-    pthread_mutex_unlock(&g_motionMutex);
+    DB_pthread_mutex_unlock(&g_motionMutex);
 }
 
 motionData_t getMotionData() {
@@ -3418,9 +3528,9 @@ motionData_t getMotionData() {
      * Lock the motion data mutex and update the motion data so that the NDI code
      * running on the main thread can send it to the camera.
      */
-    pthread_mutex_lock(&g_motionMutex);
+    DB_pthread_mutex_lock(&g_motionMutex);
     newMotionData = g_motionData;
-    pthread_mutex_unlock(&g_motionMutex);
+    DB_pthread_mutex_unlock(&g_motionMutex);
     return newMotionData;
 }
 
@@ -3885,41 +3995,41 @@ uint32_t parseSequenceNumber(uint8_t *data, size_t length) {
 void push_response(uint8_t *response, size_t length) {
   bool localDebug = false;
   if (enable_verbose_debugging || localDebug) {
-    pthread_mutex_lock(&g_networkMutex);
+    DB_pthread_mutex_lock(&g_networkMutex);
     fprintf(stderr, "PUSH RESPONSE\n");
     fprintf(stderr, "BEFORE:\n"); printQueue(g_visca_indata);
-    pthread_mutex_unlock(&g_networkMutex);
+    DB_pthread_mutex_unlock(&g_networkMutex);
   }
 
   uint32_t sequenceNumber = parseSequenceNumber(response, length);
 
   push_packet(response, length, g_visca_indata, false, sequenceNumber);
   if (enable_verbose_debugging || localDebug) {
-    pthread_mutex_lock(&g_networkMutex);
+    DB_pthread_mutex_lock(&g_networkMutex);
     fprintf(stderr, "AFTER:\n"); printQueue(g_visca_indata);
-    pthread_mutex_unlock(&g_networkMutex);
+    DB_pthread_mutex_unlock(&g_networkMutex);
   }
 }
 
 void push_request(uint8_t *request, size_t length, bool isInquiry, uint32_t sequenceNumber) {
   bool localDebug = false;
   if (enable_verbose_debugging || localDebug) {
-    pthread_mutex_lock(&g_networkMutex);
+    DB_pthread_mutex_lock(&g_networkMutex);
     fprintf(stderr, "BEFORE:\n"); printQueue(g_visca_outdata);
-    pthread_mutex_unlock(&g_networkMutex);
+    DB_pthread_mutex_unlock(&g_networkMutex);
   }
   push_packet(request, length, g_visca_outdata, isInquiry, sequenceNumber);
   if (enable_verbose_debugging || localDebug) {
-    pthread_mutex_lock(&g_networkMutex);
+    DB_pthread_mutex_lock(&g_networkMutex);
     fprintf(stderr, "AFTER:\n"); printQueue(g_visca_outdata);
-    pthread_mutex_unlock(&g_networkMutex);
+    DB_pthread_mutex_unlock(&g_networkMutex);
   }
 }
 
 void push_packet(uint8_t *data, size_t length, visca_network_queue_t queue, bool isInquiry, uint32_t sequenceNumber) {
   visca_network_packet_t packet = newVISCANetworkPacket(data, length, isInquiry, sequenceNumber);
 
-  pthread_mutex_lock(&g_networkMutex);
+  DB_pthread_mutex_lock(&g_networkMutex);
 
   packet->next = NULL;
   packet->prev = NULL;
@@ -3937,7 +4047,7 @@ void push_packet(uint8_t *data, size_t length, visca_network_queue_t queue, bool
     fprintf(stderr, "Packet: %p Head: %p Tail: %p\n", packet, queue->head, queue->tail);
   }
 
-  pthread_mutex_unlock(&g_networkMutex);
+  DB_pthread_mutex_unlock(&g_networkMutex);
 }
 
 void debug_response_handlers_locked(const char *context) {
@@ -3953,9 +4063,9 @@ void debug_response_handlers_locked(const char *context) {
 }
 
 void debug_response_handlers(const char *context) {
-  pthread_mutex_lock(&g_networkMutex);
+  DB_pthread_mutex_lock(&g_networkMutex);
   debug_response_handlers_locked(context);
-  pthread_mutex_unlock(&g_networkMutex);
+  DB_pthread_mutex_unlock(&g_networkMutex);
 }
 
 void add_response_handler(packetResponseHandler handler) {
@@ -3963,7 +4073,7 @@ void add_response_handler(packetResponseHandler handler) {
   memset(item, 0, sizeof(*item));
   item->handlerBlock = handler;
 
-  pthread_mutex_lock(&g_networkMutex);
+  DB_pthread_mutex_lock(&g_networkMutex);
   item->prev = NULL;
   item->next = g_response_handler_queue;
   if (g_response_handler_queue != NULL) {
@@ -3971,25 +4081,25 @@ void add_response_handler(packetResponseHandler handler) {
   }
   g_response_handler_queue = item;
   debug_response_handlers_locked("add_response_handler end");
-  pthread_mutex_unlock(&g_networkMutex);
+  DB_pthread_mutex_unlock(&g_networkMutex);
 }
 
 void remove_response_handler(packetResponseHandler handler) {
-  pthread_mutex_lock(&g_networkMutex);
+  DB_pthread_mutex_lock(&g_networkMutex);
 
   debug_response_handlers_locked("remove_response_handler start");
   for (response_handler_queue_item_t handlerItem = g_response_handler_queue;
        handlerItem; handlerItem = handlerItem->next) {
     if (handlerItem->handlerBlock == handler) {
       remove_response_handler_item(handlerItem);
-      pthread_mutex_unlock(&g_networkMutex);
+      DB_pthread_mutex_unlock(&g_networkMutex);
       return;
     }
   }
   fprintf(stderr, "WARNING: Could not remove handler in remove_response_handler!\n");
 
   debug_response_handlers_locked("remove_response_handler end");
-  pthread_mutex_unlock(&g_networkMutex);
+  DB_pthread_mutex_unlock(&g_networkMutex);
 }
 
 void remove_response_handler_item(response_handler_queue_item_t handler) {
@@ -4012,7 +4122,7 @@ void remove_response_handler_item(response_handler_queue_item_t handler) {
 
 void process_incoming_packets(void) {
   int localDebug = 0;
-  pthread_mutex_lock(&g_networkMutex);
+  DB_pthread_mutex_lock(&g_networkMutex);
 
   double now = getVISCATimestamp();
 
@@ -4066,7 +4176,7 @@ void process_incoming_packets(void) {
       }
     }
   }
-  pthread_mutex_unlock(&g_networkMutex);
+  DB_pthread_mutex_unlock(&g_networkMutex);
 }
 
 int ackType(visca_network_packet_t packet) {
@@ -4100,20 +4210,36 @@ double getVISCATimestamp(void) {
 }
 
 void *runNetworkThread(void *argIgnored) {
+  int time_to_retry = 1;
+  int last_start = time(NULL) - 1;
   while (!exit_app) {
     ssize_t localResponseLength = 0;
 
-    pthread_mutex_lock(&g_networkMutex);
+    DB_pthread_mutex_lock(&g_networkMutex);
     int sock = g_visca_sock;
     if (sock == -1 && g_visca_sockaddr != NULL) {
+      if (time(NULL) - last_start < time_to_retry) {
+        // Unlock immediately.
+        DB_pthread_mutex_unlock(&g_networkMutex);
+
+        // Sleep 100 milliseconds.
+        usleep(100000);
+
+        // Restart the loop.
+        continue;
+      }
+      last_start = time(NULL);
       sock = directlyConnectToVISCAPortWithAddress(g_visca_sockaddr);
       g_visca_sock = sock;
       if (sock == -1) {
-          fprintf(stderr, "VISCA failed.");
+          fprintf(stderr, "VISCA failed.\n");
+          time_to_retry = MIN(time_to_retry * 2, 8);
+      } else {
+          fprintf(stderr, "VISCA ready.\n");
+          time_to_retry = 1;
       }
-      fprintf(stderr, "VISCA ready.\n");
     }
-    pthread_mutex_unlock(&g_networkMutex);
+    DB_pthread_mutex_unlock(&g_networkMutex);
 
     int udp_offset = g_visca_use_udp ? 8 : 0;
     bool localDebug = false;
@@ -4166,10 +4292,10 @@ void *runNetworkThread(void *argIgnored) {
             if (enable_verbose_debugging && localDebug) {
                 fprintf(stderr, "Write set\n");
             }
-            pthread_mutex_lock(&g_networkMutex);
+            DB_pthread_mutex_lock(&g_networkMutex);
             if (sock != g_visca_sock) {
                 // The socket changed while the network thread was unlocked (unlikely).  Run away.
-                pthread_mutex_unlock(&g_networkMutex);
+                DB_pthread_mutex_unlock(&g_networkMutex);
                 continue;
             }
             visca_network_packet_t packet = g_visca_outdata->head;
@@ -4186,7 +4312,7 @@ void *runNetworkThread(void *argIgnored) {
                     fprintf(stderr, "Nothing to send\n");
                 }
             }
-            pthread_mutex_unlock(&g_networkMutex);
+            DB_pthread_mutex_unlock(&g_networkMutex);
         }
     } else if (first_sock == -1 && errno != EINTR) {
         // This is seriously noisy, so require two flags to enable.
