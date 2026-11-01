@@ -28,7 +28,7 @@
 
 #include <Block.h>
 
-#define NSEC_PER_SEC 1000000000 
+#define NSEC_PER_SEC 1000000000
 
 extern "C" {
 #ifdef USE_TFBLIB
@@ -210,8 +210,11 @@ bool enable_visca_ptz = false;
 bool visca_running = false;
 bool use_visca_for_presets = false;
 
+#ifdef DEAD_CODE
 double gCurrentPanPosition = 0;   // Only valid if VISCA is enabled.
 double gCurrentTiltPosition = 0;  // Only valid if VISCA is enabled.
+#endif  // DEAD_CODE
+
 #ifdef ENABLE_PAN_TILT_SPEED_COMPENSATION
 double gCurrentZoomPosition = 0;  // Only valid if VISCA is enabled.
 #endif
@@ -491,6 +494,7 @@ motionData_t g_motionData;
     AvahiSimplePoll *g_avahi_simple_poll = NULL;
     AvahiClient *g_avahi_client = NULL;
     AvahiServiceBrowser *g_avahi_service_browser = NULL;
+    char *g_avahi_browseContext = NULL;
 #else
     DNSServiceRef g_dnssd_browseRef = NULL, g_dnssd_resolveRef = NULL, g_dnssd_lookupRef = NULL;
     char *g_dnssd_browseContext = NULL;
@@ -593,7 +597,10 @@ int main(int argc, char *argv[]) {
     address.sin_family = AF_INET;
     address.sin_port = 0;  // Set in connect method.
     inet_aton("127.0.0.1", &address.sin_addr);
+
+    DB_pthread_mutex_lock(&g_networkMutex);
     g_visca_sock = directlyConnectToVISCAPortWithAddress((struct sockaddr *)&address);
+    DB_pthread_mutex_unlock(&g_networkMutex);
 
     fprintf(stderr, "SOCK: %d\n", g_visca_sock);
 
@@ -1049,14 +1056,12 @@ void *runNDIRunLoop(void *receiver_thread_data_ref) {
                 }
                 DB_pthread_mutex_unlock(&g_avahiMutex);
                 if (avahi_error != 0) {
-                    stream_name = strdup(stream_name);
                     // Something went horribly wrong.  Just null out the references and start over.
                     g_avahi_simple_poll = NULL;
                     g_avahi_client = NULL;
                     g_avahi_service_browser = NULL;
 
                     visca_running = connectVISCA(stream_name, "2");
-                    free(stream_name);
                 }
             }
 #else
@@ -1073,15 +1078,15 @@ void *runNDIRunLoop(void *receiver_thread_data_ref) {
 
                 int maxfd = -1;
                 if (browsefd != -1) {
-                    FD_SET(browsefd, &set); 
+                    FD_SET(browsefd, &set);
                     maxfd = MAX(maxfd, browsefd);
                 }
                 if (resolvefd != -1) {
-                    FD_SET(resolvefd, &set); 
+                    FD_SET(resolvefd, &set);
                     maxfd = MAX(maxfd, resolvefd);
                 }
                 if (lookupfd != -1) {
-                    FD_SET(lookupfd, &set); 
+                    FD_SET(lookupfd, &set);
                     maxfd = MAX(maxfd, lookupfd);
                 }
 
@@ -1538,7 +1543,7 @@ void avahi_browse_callback(AvahiServiceBrowser *browser,
                            const char *domain,
                            AVAHI_GCC_UNUSED AvahiLookupResultFlags flags,
                            void *userdata);
-void handleDNSResponse(const struct sockaddr *address);
+bool handleDNSResponse(const struct sockaddr *address);
 
 bool connectVISCA(char *unsafe_stream_name, const char *context) {
     fprintf(stderr, "Called connectVISCA in context %s\n", context);
@@ -1548,8 +1553,7 @@ bool connectVISCA(char *unsafe_stream_name, const char *context) {
         sa.sin_family = AF_INET;
         sa.sin_port = 0;
         sa.sin_addr = g_visca_custom_ip;
-        handleDNSResponse((sockaddr *)&sa);
-        return true;
+        return handleDNSResponse((sockaddr *)&sa);
     }
 
     char *stream_name = strdup(unsafe_stream_name);
@@ -1563,6 +1567,7 @@ bool connectVISCA(char *unsafe_stream_name, const char *context) {
         if (!(avahi_simple_poll = avahi_simple_poll_new())) {
             fprintf(stderr, "Failed to create Avahi run loop.\n");
             DB_pthread_mutex_unlock(&g_avahiMutex);
+            free(stream_name);
             return false;
         }
     }
@@ -1574,6 +1579,7 @@ bool connectVISCA(char *unsafe_stream_name, const char *context) {
             avahi_simple_poll_free(avahi_simple_poll);
             g_avahi_simple_poll = NULL;
             DB_pthread_mutex_unlock(&g_avahiMutex);
+            free(stream_name);
             return false;
         }
         avahi_client = avahi_client_new(poll,
@@ -1586,6 +1592,7 @@ bool connectVISCA(char *unsafe_stream_name, const char *context) {
             avahi_simple_poll_free(avahi_simple_poll);
             g_avahi_simple_poll = NULL;
             DB_pthread_mutex_unlock(&g_avahiMutex);
+            free(stream_name);
             return false;
         }
     }
@@ -1606,8 +1613,13 @@ bool connectVISCA(char *unsafe_stream_name, const char *context) {
         g_avahi_simple_poll = NULL;
         g_avahi_service_browser = NULL;
         DB_pthread_mutex_unlock(&g_avahiMutex);
+        free(stream_name);
         return false;
     }
+    if (g_avahi_browseContext != NULL) {
+        free(g_avahi_browseContext);
+    }
+    g_avahi_browseContext = stream_name;
 
     g_avahi_simple_poll = avahi_simple_poll;
     g_avahi_client = avahi_client;
@@ -1703,17 +1715,13 @@ void avahi_resolve_callback(AvahiServiceResolver *resolver,
                 sa.sin_addr.s_addr = address->data.ipv4.address;
                 handleDNSResponse((sockaddr *)&sa);
             }
-            if (g_visca_sock == -1) {
-                // Keep trying.
-                return;
-            }
             break;
     }
     avahi_service_resolver_free(resolver);
 }
 
-void handleDNSResponse(const struct sockaddr *address) {
-    (void)connectToVISCAPortWithAddress(address);
+bool handleDNSResponse(const struct sockaddr *address) {
+    return connectToVISCAPortWithAddress(address);
 }
 
 #else // ! USE_AVAHI
@@ -1986,6 +1994,9 @@ int directlyConnectToVISCAPortWithAddress(const struct sockaddr *address) {
     }
     int reuseValue = 1;
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuseValue, sizeof(reuseValue));
+    // Limit the potential for blocking the NDI thread.
+    struct timeval sendTimeout = { 0, 200000 };
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &sendTimeout, sizeof(sendTimeout));
 
     struct sockaddr_in sa_recv;
     bzero(&sa_recv, sizeof(sa_recv));
@@ -2001,11 +2012,14 @@ int directlyConnectToVISCAPortWithAddress(const struct sockaddr *address) {
     if (g_visca_use_udp) {
         g_visca_addr = sa;
     } else {
+        DB_pthread_mutex_unlock(&g_networkMutex);
         if (connect(sock, (struct sockaddr *) &sa, sizeof(sa)) == -1) {
             perror("Connect failed");
             close(sock);
+            DB_pthread_mutex_lock(&g_networkMutex);
             return -1;
         }
+        DB_pthread_mutex_lock(&g_networkMutex);
     }
     return sock;
 }
@@ -2029,7 +2043,7 @@ void sendPTZUpdatesOverVISCA(motionData_t *motionData) {
 
     updateVISCAMaxSpeed(g_visca_sock);
     updateTallyLightsOverVISCA(g_visca_sock);
-#if 0
+#ifdef ENABLE_PAN_TILT_SPEED_COMPENSATION
     updateZoomPositionOverVISCA(g_visca_sock);
 #endif
     if (enable_visca_ptz) {
@@ -2107,6 +2121,7 @@ void updateVISCAMaxSpeed(int sock) {
     free(responseBuf);
 }
 
+#ifdef DEAD_CODE
 void updatePanTiltPositionOverVISCA(int sock) {
     static struct timeval lastCheck = { 0, 0 };
     struct timeval curTime;
@@ -2153,7 +2168,7 @@ void updatePanTiltPositionOverVISCA(int sock) {
     }
     if (!isSet) {
         isSet = true;
-    } else { 
+    } else {
         if (g_last_pan_level == 0 && lastPanPosition != gCurrentPanPosition) {
             // If the camera should not be moving, but is, increment the
             // failure count.
@@ -2203,6 +2218,7 @@ void updatePanTiltPositionOverVISCA(int sock) {
     }
     free(responseBuf);
 }
+#endif // DEAD_CODE
 
 #ifdef ENABLE_PAN_TILT_SPEED_COMPENSATION
 void updateZoomPositionOverVISCA(int sock) {
@@ -2289,7 +2305,7 @@ bool updateZoomPositionOverVISCA(int sock, bool digitalMode) {
 #endif
     if (!isSet) {
         isSet = true;
-    } else if (!g_is_loading_preset) { 
+    } else if (!g_is_loading_preset) {
         if (g_last_zoom_level == 0 && lastZoomPosition != gCurrentZoomPosition) {
             // If the camera should not be moving, but is, increment the
             // failure count.
@@ -2398,7 +2414,7 @@ void sendZoomUpdatesOverVISCA(int sock, motionData_t *motionData) {
         if (enable_ptz_debugging) {
             fprintf(stderr, "zoom speed: %d buf: 0x%02x\n", level, buf[4]);
         }
-    
+
         send_visca_packet(sock, buf, sizeof(buf), VISCA_ACK_TIMEOUT, false, NULL);
     } else {
         uint8_t buf[6] = { 0x81, 0x01, 0x04, 0x07, 0x00, 0xFF };
@@ -2532,9 +2548,6 @@ void sendExtendedPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData) {
     const bool localDebug = false;
     int pan_level = (int)(motionData->xAxisPosition * (gMaxPanTiltValue + 0.9));
     int tilt_level = (int)(motionData->yAxisPosition * (gMaxPanTiltValue + 0.9));
-
-    static int g_last_pan_level = 0;
-    static int g_last_tilt_level = 0;
 
     static int count = 0;
 
@@ -2694,12 +2707,11 @@ ssize_t get_expected_response_length(uint8_t *buf, ssize_t bufsize) {
 
 uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout_usec, ssize_t *responseLength) {
     bool localDebug = enable_verbose_debugging || false;
-    if (sock == -1) {
-        *responseLength = 0;
-        return NULL;
-    }
 
-    int expectedLength = get_expected_response_length(buf, bufsize);
+    *responseLength = 0;
+    if (sock == -1) return NULL;
+
+    const int expectedLength = get_expected_response_length(buf, bufsize);
 
     __block pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
     __block pthread_cond_t semaphore = PTHREAD_COND_INITIALIZER;
@@ -2710,7 +2722,7 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
     __block uint32_t sequenceNumber = 0;  // Populated below.
 
     packetResponseHandler handler = ^(visca_network_packet_t packet) {
-        int udp_offset = g_visca_use_udp ? 8 : 0;
+        const size_t udp_offset = g_visca_use_udp ? 8 : 0;
 
         if (packet->length < udp_offset) return false;
 
@@ -2758,6 +2770,12 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
                   fprintf(stderr, "Is a syntax error packet.  Reporting the error.\n");
                 }
                 isError = true;
+              } else {
+                // Some other error packet.  Ignoring.
+                if (localDebug) {
+                  fprintf(stderr, "Error packet.  Ignoring.\n");
+                }
+                return false;
               }
             } else {
               if (localDebug) {
@@ -2778,6 +2796,7 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
           }
           localResponseLength = 0;
           responseBuf = NULL;
+          ready = true;
         } else {
           if (localDebug) {
             fprintf(stderr, "Returning data.\n");
@@ -2804,7 +2823,7 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
     add_response_handler(handler);
 #endif
 
-    struct timespec abs_timeout;    
+    struct timespec abs_timeout;
     clock_gettime(CLOCK_REALTIME, &abs_timeout);
     uint64_t nsec = abs_timeout.tv_nsec + ((uint64_t)timeout_usec) * 1000;
     abs_timeout.tv_nsec = nsec % NSEC_PER_SEC;
@@ -2834,6 +2853,7 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
 
         pthread_mutex_destroy(&mutex);
         pthread_cond_destroy(&semaphore);
+        if (responseBuf != NULL) free(responseBuf);
 
         return NULL;
       }
@@ -2898,7 +2918,7 @@ int send_visca_packet_raw(int sock, uint8_t *buf, ssize_t bufsize, bool isInquir
         udpbuf[1] = isInquiry ? 0x10 : 0x00;
         udpbuf[2] = 0x00;
         udpbuf[3] = bufsize;
-// 
+//
         udpbuf[4] = sequenceNumber >> 24;
         udpbuf[5] = (sequenceNumber >> 16) & 0xff;
         udpbuf[6] = (sequenceNumber >> 8) & 0xff;
@@ -2916,8 +2936,13 @@ int send_visca_packet_raw(int sock, uint8_t *buf, ssize_t bufsize, bool isInquir
         }
         free(udpbuf);
     } else {
-        if (write(sock, buf, bufsize) != bufsize) {
+        size_t bytesWritten = write(sock, buf, bufsize);
+        // If we get a partial write, ensure that the connection is closed and reopened.
+        if (bytesWritten != bufsize) {
             perror("write failed.");
+            if (bytesWritten > 0) {
+                shutdown(sock, SHUT_RDWR);
+            }
             return -1;
         }
     }
@@ -2963,6 +2988,7 @@ bool get_ack(int sock, uint32_t sequence_number, int timeout_usec) {
         }
 
         DB_pthread_mutex_unlock(&g_networkMutex);
+        usleep(200);  // Because glibc mutexes are not fair, sleep a bit so we don't starve other threads.
     }
 
     return found_5;
@@ -3931,7 +3957,7 @@ float scaleAxisValue(int axis, int rawValue) {
 
     if (scale < 1) scale = 1;
     if (scale > 10) scale = 10;
-    
+
     if (enable_verbose_debugging || true) {
         fprintf(stderr, "Current zoom position: %lf\nZoom percent: %lf\nScale: %lf\n", gCurrentZoomPosition, zoomPercent, scale);
     }
@@ -3963,7 +3989,7 @@ visca_network_packet_t deletePacketFromQueue(visca_network_packet_t packet, visc
   return nextPacket;
 }
 
-visca_network_packet_t newVISCANetworkPacket(uint8_t *data, size_t length, bool isInquiry, 
+visca_network_packet_t newVISCANetworkPacket(uint8_t *data, size_t length, bool isInquiry,
                                              uint32_t sequenceNumber) {
   visca_network_packet_t packet = (visca_network_packet_t)malloc(sizeof(*packet));
   packet->length = length;
@@ -3986,7 +4012,7 @@ void printQueue(visca_network_queue_t queue) {
 
 uint32_t parseSequenceNumber(uint8_t *data, size_t length) {
   if (g_visca_use_udp) {
-    return (uint32_t)data[4] << 24 | data[5] << 16 | data[6] << 8 | data[7];
+    return (length < 8) ? 0 : (uint32_t)data[4] << 24 | data[5] << 16 | data[6] << 8 | data[7];
   } else {
     return 42;  // Unused anyway.
   }
@@ -4185,7 +4211,7 @@ int ackType(visca_network_packet_t packet) {
     if (enable_verbose_debugging) {
         fprintf(stderr, "in ackType\n");
     }
-    if (packet->length != 3 && packet->length != 3 + udp_offset) return -1;
+    if (packet->length != 3 + udp_offset) return -1;
     if (!packet->data) return -1;
     if (packet->data[0 + udp_offset] != 0x90 && localDebug) {
         if (localDebug) fprintf(stderr, "Unexpected ack address 0x%02x\n", packet->data[0 + udp_offset]);
@@ -4283,8 +4309,15 @@ void *runNetworkThread(void *argIgnored) {
               uint8_t *data = (uint8_t *)malloc(received_length);
               bcopy(buf, data, received_length);
               push_response(data, received_length);
+            } else if (received_length == 0) {
+              // Disconnected TCP socket.
+              DB_pthread_mutex_lock(&g_networkMutex);
+              if (sock == g_visca_sock && !g_visca_use_udp) {
+                close(sock);
+                g_visca_sock = -1;
+              }
+              DB_pthread_mutex_unlock(&g_networkMutex);
             }
-    
             continue;
         }
         if (FD_ISSET(sock, &writefds)) {
