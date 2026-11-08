@@ -266,7 +266,7 @@ typedef struct receiver_thread_data {
     const NDIlib_v3 *p_NDILib;
     NDIlib_recv_instance_t pNDI_recv;
     char *stream_name;
-    std::atomic<bool> running; //(true);
+    _Atomic bool running;
 } *receiver_thread_data_t;
 
 typedef struct receiver_array_item {
@@ -703,16 +703,18 @@ int main(int argc, char *argv[]) {
         // NDI only has exposure setting, VISCA only has compensation, iris, gain,
         // and shutter speed.  Ugh.
         if (!strcmp(argv[i], "-e") || !strcmp(argv[i], "--exposure_compensation")) {
+            int val = 0;
             if (argc > i + 1) {
-                g_exposure_compensation = atoi(argv[i+1]);
-                g_set_exposure_compensation = true;
+                val = atoi(argv[i+1]);
                 i++;
             }
-            if (g_exposure_compensation > 5 || g_exposure_compensation < -5) {
-                fprintf(stderr, "Invalid exposure compentation %d.  (Valid range: -5 to 5)\n", g_exposure_compensation);
+            if (val > 5 || val < -5) {
+                fprintf(stderr, "Invalid exposure compentation %d.  (Valid range: -5 to 5)\n", val);
                 g_exposure_compensation = 0;
                 g_set_exposure_compensation = false;
             } else {
+                g_exposure_compensation = (int8_t)val;
+                g_set_exposure_compensation = true;
                 fprintf(stderr, "Set exposure compentation to %d.\n", g_exposure_compensation);
             }
         }
@@ -721,46 +723,52 @@ int main(int argc, char *argv[]) {
             g_set_auto_exposure = true;
         }
         if (!strcmp(argv[i], "-i") || !strcmp(argv[i], "--iris")) {
+            int val = 0;
             if (argc > i + 1) {
-                g_manual_iris = atoi(argv[i+1]);
-                g_set_manual_iris = true;
+                val = atoi(argv[i+1]);
                 i++;
             }
-            if (g_manual_iris > 21 || g_manual_iris < 0) {
-                fprintf(stderr, "Invalid manual iris %d.  (Valid range: 0 to 21)\n", g_manual_iris);
+            if (val > 15 || val < 0) {
+                fprintf(stderr, "Invalid manual iris %d.  (Valid range: 0 to 15)\n", val);
                 g_manual_iris = 0;
                 g_set_manual_iris = false;
             } else {
+                g_manual_iris = (int8_t)val;
+                g_set_manual_iris = true;
                 fprintf(stderr, "Set manual iris to %d.\n", g_manual_iris);
             }
         }
 
         if (!strcmp(argv[i], "-g") || !strcmp(argv[i], "--gain")) {
+            int val = 0;
             if (argc > i + 1) {
-                g_manual_gain = atoi(argv[i+1]);
-                g_set_manual_gain = true;
+                val = atoi(argv[i+1]);
                 i++;
             }
-            if (g_manual_gain > 15 || g_manual_gain < 0) {
-                fprintf(stderr, "Invalid manual gain %d.  (Valid range: 0 to 15)\n", g_manual_gain);
+            if (val > 15 || val < 0) {
+                fprintf(stderr, "Invalid manual gain %d.  (Valid range: 0 to 15)\n", val);
                 g_manual_gain = 0;
                 g_set_manual_gain = false;
             } else {
+                g_manual_gain = (int8_t)val;
+                g_set_manual_gain = true;
                 fprintf(stderr, "Set manual gain to %d.\n", g_manual_gain);
             }
         }
 
         if (!strcmp(argv[i], "-s") || !strcmp(argv[i], "--shutter")) {
+            int val = 0;
             if (argc > i + 1) {
-                g_manual_shutter = atoi(argv[i+1]);
-                g_set_manual_shutter = true;
+                val = atoi(argv[i+1]);
                 i++;
             }
-            if (g_manual_shutter > 21 || g_manual_shutter < 0) {
-                fprintf(stderr, "Invalid manual shutter %d.  (Valid range: 0 to 21)\n", g_manual_shutter);
+            if (val > 21 || val < 0) {
+                fprintf(stderr, "Invalid manual shutter %d.  (Valid range: 0 to 21)\n", val);
                 g_manual_shutter = 0;
                 g_set_manual_shutter = false;
             } else {
+                g_manual_shutter = (int8_t)val;
+                g_set_manual_shutter = true;
                 fprintf(stderr, "Set manual shutter to %d.\n", g_manual_shutter);
             }
         }
@@ -833,7 +841,7 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
 
         if (!NDIlib_initialize()) {
             printf("The NDI library could not be initialized.");
-            exit(0);
+            exit(1);
         }
 
         // Run the shared library initialization function (boilerplate NDI SDK code).
@@ -845,7 +853,7 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
             // NDI is not supported- nost likely because the CPU is not sufficient (see SDK documentation).
             // You can check this directly by calling NDIlib_is_supported_CPU().
             printf("Cannot run NDI.");
-            exit(0);
+            exit(1);
         }
 
         // Catch SIGINT so that this tool can close NDI streams properly if the user presses control-C.
@@ -855,7 +863,7 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
         // First, search for NDI sources on the network.
         const NDIlib_find_create_t NDI_find_create_desc = { true, NULL };
         NDIlib_find_instance_t pNDI_find = p_NDILib->NDIlib_find_create_v2(&NDI_find_create_desc);
-        if (!pNDI_find) exit(0);
+        if (!pNDI_find) exit(1);
 
         // Wait until at least one source is found, or one second, whichever is longer.
         uint32_t no_sources = 0;
@@ -963,10 +971,31 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
         } while (!exit_app && (stream_name != NULL || (time(NULL) < scanStartTime + 5)));
 
         exit_app = true;
-        for (receiver_array_item_t receiver_item = g_active_receivers;
-             receiver_item != NULL; receiver_item = receiver_item->next) {
+        receiver_array_item_t receiver_item = g_active_receivers;
+        while (receiver_item != NULL) {
+            receiver_array_item_t next_receiver = receiver_item->next;
             pthread_join(receiver_item->receiver_thread, NULL);
+            if (receiver_item->receiver != nullptr) {
+                printf("Closing the connection.\n");
+                p_NDILib->NDIlib_recv_connect(receiver_item->receiver, NULL);
+
+                printf("Destroying the NDI receiver.\n");
+                p_NDILib->NDIlib_recv_destroy(receiver_item->receiver);
+                printf("The NDI receiver has been destroyed.\n");
+            }
+            free_receiver_item(receiver_item);
+            receiver_item = next_receiver;
         }
+        g_active_receivers = NULL;
+
+        pthread_join(motionThread, NULL);
+        if (enable_visca && enable_visca_ptz && g_visca_sock != -1) {
+            motionData_t stopMotionData;
+            bzero(&stopMotionData, sizeof(stopMotionData));
+            sendZoomUpdatesOverVISCA(g_visca_sock, &stopMotionData);
+            sendPanTiltUpdatesOverVISCA(g_visca_sock, &stopMotionData);
+        }
+        pthread_join(networkThread, NULL);
 
         // Destroy the NDI finder. We needed to have access to the pointers to p_sources[0]
         p_NDILib->NDIlib_find_destroy(pNDI_find);
@@ -1131,6 +1160,10 @@ void *runNDIRunLoop(void *receiver_thread_data_ref) {
                 fprintf(stderr, "PTZ Disabled\n");
             }
         }
+    }
+    if (g_ptzEnabled && (!enable_visca_ptz || !visca_running || g_visca_sock == -1)) {
+        NDIlib_recv_ptz_zoom_speed(pNDI_recv, 0.0f);
+        NDIlib_recv_ptz_pan_tilt_speed(pNDI_recv, 0.0f, 0.0f);
     }
     thread_data->running = false;
     return NULL;
@@ -3624,7 +3657,7 @@ motionData_t getMotionData() {
 // periodically, we limit the amount of CPU overhead, leaving more cycles to do
 // the actual H.264 or H.265 decoding.
 void *runPTZThread(void *argIgnored) {
-    while (true) {
+    while (!exit_app) {
 #ifdef DEMO_MODE
         demoPTZValues();
 #else  // !DEMO_MODE
