@@ -29,7 +29,9 @@
 
 #include <Block.h>
 
+#ifndef NSEC_PER_SEC
 #define NSEC_PER_SEC 1000000000
+#endif
 
 extern "C" {
 #ifdef USE_TFBLIB
@@ -2451,6 +2453,8 @@ void updateTallyLightsOverVISCA(int sock) {
     free(responseBuf);
 }
 
+// For now, this is disabled.  At some point, we might want to do that, but only
+// if I decide on a speed behavior that makes sense across various cameras.
 void sendVISCASetRecallSpeed(uint8_t speed, int sock) {
     // uint8_t buf[7] = { 0x81, 0x01, 0x06, 0x01, speed, 0xFF };
     // send_visca_packet(sock, buf, sizeof(buf), VISCA_ACK_TIMEOUT, false, NULL);
