@@ -245,7 +245,7 @@ uint8_t base_duty_cycle = 255;
 #endif // __linux__
 
 #define MAX_BUTTONS 5  // Theoretically, 9, but I don't want to build that much hardware.  Numbered 1 to 5.
-#define BUTTON_SET 0   // If the set button is held down, we store a value for that button instead of retrieving it.
+#define BUTTON_SET 0   // Toggles set mode; when enabled, we store a value for that button instead of retrieving it.
 
 typedef struct {
     float xAxisPosition;
@@ -3372,10 +3372,13 @@ void updatePTZValues() {
     /*
      * Compute the number of the position to store or retrieve.
      *
-     * If the set button is down and the user presses a numbered button,
+     * For electrical reliability reasons, the set button toggles set mode on
+     * and off.  While set mode is active, the set light is lit.
+     *
+     * If set mode is active and the user presses a numbered button,
      * storePositionNumber contains that button's number.
      *
-     * If the set button is *not* down and the user presses a numbered button,
+     * If set mode is *not* active and the user presses a numbered button,
      * retrievePositionNumber contains that button's number.
      *
      * Otherwise, both values are zero (0).
