@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <atomic>
+#include <stdatomic.h>
 #include <chrono>
 #include <semaphore.h>
 #include <string>
@@ -350,7 +351,7 @@ float scaleAxisValue(int axis, int rawValue);
 
 double getVISCATimestamp(void);
 
-struct timespec last_frame_time;
+_Atomic uint64_t last_frame_time_ns = 0;
 
 bool g_ptzEnabled = false;
 
@@ -917,7 +918,7 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
                         thread_data->pNDI_recv = receiver_item->receiver;
                         safe_asprintf(&thread_data->stream_name, "%s", stream_name);
                         receiver_item->thread_data = thread_data;
-                        thread_data->running = true;
+                        atomic_store(&thread_data->running, true);
                         if (pthread_create(&receiver_item->receiver_thread, NULL, runNDIRunLoop, thread_data) == 0) {
                             g_active_receivers = receiver_item;
                             fprintf(stderr, "Connected.\n");
@@ -932,7 +933,7 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
                             }
                         } else {
                             p_NDILib->NDIlib_recv_destroy(receiver_item->receiver);
-                            thread_data->running = false;
+                            atomic_store(&thread_data->running, false);
                             free_receiver_item(receiver_item);
                         }
                     }
@@ -941,7 +942,7 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
             receiver_array_item_t receiver_item = g_active_receivers;
             while (receiver_item != NULL) {
                 receiver_array_item_t next_receiver = receiver_item->next;
-                if (!receiver_item->thread_data->running) {
+                if (!atomic_load(&receiver_item->thread_data->running)) {
                     pthread_detach(receiver_item->receiver_thread);
                     if (receiver_item->receiver != nullptr) {
                         // Clean up the NDI receiver (stops packet transmission).
@@ -1052,8 +1053,10 @@ void *runNDIRunLoop(void *receiver_thread_data_ref) {
             case NDIlib_frame_type_error:
                 exit_loop = true;
                 break;
-            case NDIlib_frame_type_video:
-                clock_gettime(CLOCK_REALTIME, &last_frame_time);
+            case NDIlib_frame_type_video: {
+                struct timespec now_ts;
+                clock_gettime(CLOCK_MONOTONIC, &now_ts);
+                atomic_store(&last_frame_time_ns, ((uint64_t)now_ts.tv_sec * 1000000000ULL) + (uint64_t)now_ts.tv_nsec);
                 if (enable_debugging) {
                     fprintf(stderr, "Video frame\n");
                 }
@@ -1063,6 +1066,7 @@ void *runNDIRunLoop(void *receiver_thread_data_ref) {
                 }
                 NDIlib_recv_free_video_v2(pNDI_recv, &video_recv);
                 break;
+            }
             case NDIlib_frame_type_status_change:
                 g_ptzEnabled = NDIlib_recv_ptz_is_supported(pNDI_recv);
                 break;
@@ -1165,7 +1169,7 @@ void *runNDIRunLoop(void *receiver_thread_data_ref) {
         NDIlib_recv_ptz_zoom_speed(pNDI_recv, 0.0f);
         NDIlib_recv_ptz_pan_tilt_speed(pNDI_recv, 0.0f, 0.0f);
     }
-    thread_data->running = false;
+    atomic_store(&thread_data->running, false);
     return NULL;
 }
 
@@ -3490,10 +3494,11 @@ void updateLights(motionData_t *motionData) {
     }
 #endif // __linux__
 
-    struct timespec current_wallclock_time;
-    clock_gettime(CLOCK_REALTIME, &current_wallclock_time);
-    uint64_t diff = ((current_wallclock_time.tv_sec - last_frame_time.tv_sec) * 1000000000ULL) +
-        current_wallclock_time.tv_nsec - last_frame_time.tv_nsec;
+    struct timespec current_monotonic_time;
+    clock_gettime(CLOCK_MONOTONIC, &current_monotonic_time);
+    uint64_t now_ns = ((uint64_t)current_monotonic_time.tv_sec * 1000000000ULL) +
+        (uint64_t)current_monotonic_time.tv_nsec;
+    int64_t diff = (int64_t)now_ns - (int64_t)atomic_load(&last_frame_time_ns);
 
     g_camera_malfunctioning = diff > 100000000;  // Scream after losing 3 frames.
 
@@ -4315,9 +4320,9 @@ int ackType(visca_network_packet_t packet) {
 }
 
 double getVISCATimestamp(void) {
-    struct timeval curTime;
-    gettimeofday(&curTime, NULL);
-    return curTime.tv_sec + (curTime.tv_usec / 1000000.0);
+    struct timespec curTime;
+    clock_gettime(CLOCK_MONOTONIC, &curTime);
+    return curTime.tv_sec + (curTime.tv_nsec / 1000000000.0);
 }
 
 void *runNetworkThread(void *argIgnored) {
