@@ -324,6 +324,7 @@ enum {
     struct fb_var_screeninfo g_framebufferActiveConfiguration;
     struct fb_fix_screeninfo g_framebufferFixedConfiguration;
     unsigned char *g_framebufferMemory = NULL;
+    size_t g_framebufferMapLength = 0;  // Length passed to mmap (smem_len + page offset).
     unsigned char *g_framebufferBase = NULL;
     unsigned char *g_framebufferActiveMemory = NULL;
 
@@ -1159,13 +1160,22 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
         goto fail;
     }
 
+    // Compute the offset every time (not only when mapping), because it is also
+    // needed to derive g_framebufferBase when an existing mapping is reused after
+    // a resolution change.
+    framebufferMemoryOffset = (unsigned long)(g_framebufferFixedConfiguration.smem_start) & (~PAGE_MASK);
+
     if (g_framebufferMemory == NULL) {
-        framebufferMemoryOffset = (unsigned long)(g_framebufferFixedConfiguration.smem_start) & (~PAGE_MASK);
-        g_framebufferMemory = (unsigned char *)mmap(NULL, g_framebufferFixedConfiguration.smem_len + framebufferMemoryOffset, PROT_READ | PROT_WRITE, MAP_SHARED, g_framebufferFileHandle, 0);
-        if ((long)g_framebufferMemory == -1L) {
+        size_t mapLength = g_framebufferFixedConfiguration.smem_len + framebufferMemoryOffset;
+        void *mapped = mmap(NULL, mapLength, PROT_READ | PROT_WRITE, MAP_SHARED, g_framebufferFileHandle, 0);
+        if (mapped == MAP_FAILED) {
+            // Do not store MAP_FAILED in g_framebufferMemory; a non-NULL value would make
+            // the next call skip the mmap and use an invalid pointer.
             perror("cameracontroller: mmap");
             goto fail;
         }
+        g_framebufferMemory = (unsigned char *)mapped;
+        g_framebufferMapLength = mapLength;
     }
 
     g_framebufferActiveConfiguration = g_initialFramebufferConfiguration;
@@ -1187,7 +1197,6 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
 
     if (ioctl(g_framebufferFileHandle, FBIOPAN_DISPLAY, &g_framebufferActiveConfiguration) == -1) {
         perror("cameracontroller: FBIOPAN_DISPLAY (2)");
-        munmap(g_framebufferMemory, g_framebufferFixedConfiguration.smem_len);
         goto fail;
     }
 
@@ -1196,6 +1205,16 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
     return true;
 
   fail:
+    // Release the mapping (if any) and clear every pointer derived from it, so the
+    // next call to configureScreen remaps from scratch instead of reusing a
+    // dangling or invalid pointer.
+    if (g_framebufferMemory != NULL) {
+        munmap(g_framebufferMemory, g_framebufferMapLength);
+    }
+    g_framebufferMemory = NULL;
+    g_framebufferMapLength = 0;
+    g_framebufferBase = NULL;
+    g_framebufferActiveMemory = NULL;
     g_NDIXRes = 0;
     g_NDIYRes = 0;
     if (ioctl(g_framebufferFileHandle, FBIOPUT_VSCREENINFO, &g_initialFramebufferConfiguration) == -1) {
@@ -1336,7 +1355,13 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
         if (ioctl(g_framebufferFileHandle, FBIOGET_FSCREENINFO, &g_framebufferFixedConfiguration) == -1) {
             fprintf(stderr, "Ioctl FBIOGET_FSCREENINFO.\n");
         }
-        munmap(g_framebufferMemory, g_framebufferFixedConfiguration.smem_len);
+        if (g_framebufferMemory != NULL) {
+            munmap(g_framebufferMemory, g_framebufferMapLength);
+            g_framebufferMemory = NULL;
+            g_framebufferMapLength = 0;
+            g_framebufferBase = NULL;
+            g_framebufferActiveMemory = NULL;
+        }
         close(g_framebufferFileHandle);
     }
 
@@ -2839,7 +2864,20 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
         fprintf(stderr, "pthread_cond_timedwait\n");
       }
       DB_pthread_mutex_lock(&mutex);
-      if (!ready && DB_pthread_cond_timedwait(&semaphore, &mutex, &abs_timeout) != 0) {
+
+      // Wait in a loop on the predicate: pthread_cond_timedwait can return 0 without
+      // a signal (spurious wakeup).  Treating that as success would return an empty
+      // result while the handler is still registered, and the handler would later
+      // lock a destroyed mutex.  abs_timeout is absolute, so looping does not extend
+      // the overall timeout.
+      int waitResult = 0;
+      while (!ready && waitResult == 0) {
+        waitResult = DB_pthread_cond_timedwait(&semaphore, &mutex, &abs_timeout);
+      }
+
+      // Checking `ready` (under the mutex) rather than waitResult also handles a
+      // response that arrives just as the wait times out.
+      if (!ready) {
         if (localDebug) {
           fprintf(stderr, "Read timeout.\n");
         }
@@ -4363,4 +4401,3 @@ void *runNetworkThread(void *argIgnored) {
   }
   return NULL;
 }
-
