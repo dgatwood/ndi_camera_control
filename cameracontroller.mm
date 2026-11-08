@@ -913,12 +913,12 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
                         if (pthread_create(&receiver_item->receiver_thread, NULL, runNDIRunLoop, thread_data) == 0) {
                             g_active_receivers = receiver_item;
                             fprintf(stderr, "Connected.\n");
+                            DB_pthread_mutex_lock(&g_networkMutex);
                             if (g_visca_sock != -1) {
-                                DB_pthread_mutex_lock(&g_networkMutex);
                                 close(g_visca_sock);
                                 g_visca_sock = -1;
-                                DB_pthread_mutex_unlock(&g_networkMutex);
                             }
+                            DB_pthread_mutex_unlock(&g_networkMutex);
                             if (enable_visca) {
                                 visca_running = connectVISCA(stream_name, "1");
                             }
@@ -1989,8 +1989,10 @@ bool connectToVISCAPortWithAddress(const struct sockaddr *address) {
     g_visca_sockaddr = copiedAddress;
     free(oldAddress);
 
-    close(g_visca_sock);
-    g_visca_sock = -1;
+    if (g_visca_sock != -1) {
+        close(g_visca_sock);
+        g_visca_sock = -1;
+    }
 
     DB_pthread_mutex_unlock(&g_networkMutex);
     return true;
@@ -2430,7 +2432,6 @@ void sendZoomUpdatesOverVISCA(int sock, motionData_t *motionData) {
         if (level == g_last_zoom_level) {
             return;
         }
-        g_last_zoom_level = level;
 
         buf[4] = (level < 0) ? 0x2f : 0x3f;
         buf[5] = (abs(level) >> 8) & 0xff;
@@ -2440,7 +2441,9 @@ void sendZoomUpdatesOverVISCA(int sock, motionData_t *motionData) {
             fprintf(stderr, "zoom speed: %d buf: 0x%02x\n", level, buf[4]);
         }
 
-        send_visca_packet(sock, buf, sizeof(buf), VISCA_ACK_TIMEOUT, false, NULL);
+        if (send_visca_packet(sock, buf, sizeof(buf), VISCA_ACK_TIMEOUT, false, NULL) == 0) {
+            g_last_zoom_level = level;
+        }
     } else {
         uint8_t buf[6] = { 0x81, 0x01, 0x04, 0x07, 0x00, 0xFF };
         int level = (int)(motionData->zoomPosition * (8.9));
@@ -2458,8 +2461,6 @@ void sendZoomUpdatesOverVISCA(int sock, motionData_t *motionData) {
         if (level == g_last_zoom_level) {
             return;
         }
-        fprintf(stderr, "Setting g_last_zoom_level to %d\n", level);
-        g_last_zoom_level = level;
 
         if (level != 0) {
             buf[4] = (abs(level) - 1) | (level < 0 ? 0x20 : 0x30);
@@ -2468,7 +2469,10 @@ void sendZoomUpdatesOverVISCA(int sock, motionData_t *motionData) {
             fprintf(stderr, "zoom speed: %d buf: 0x%02x\n", level, buf[4]);
         }
 
-        send_visca_packet(sock, buf, sizeof(buf), VISCA_ACK_TIMEOUT, false, NULL);
+        if (send_visca_packet(sock, buf, sizeof(buf), VISCA_ACK_TIMEOUT, false, NULL) == 0) {
+            fprintf(stderr, "Setting g_last_zoom_level to %d\n", level);
+            g_last_zoom_level = level;
+        }
     }
 }
 
@@ -2540,8 +2544,6 @@ void sendPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData) {
     if (pan_level == g_last_pan_level && tilt_level == g_last_tilt_level) {
         return;
     }
-    g_last_pan_level = pan_level;
-    g_last_tilt_level = tilt_level;
 
     bool left = pan_level > 0;
     bool right = pan_level < 0;
@@ -2566,7 +2568,10 @@ void sendPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData) {
 
     if (localDebug) fprintf(stderr, "Sent packet %s\n", fmtbuf(buf, 9));
 
-    send_visca_packet(sock, buf, sizeof(buf), VISCA_ACK_TIMEOUT, false, NULL);
+    if (send_visca_packet(sock, buf, sizeof(buf), VISCA_ACK_TIMEOUT, false, NULL) == 0) {
+        g_last_pan_level = pan_level;
+        g_last_tilt_level = tilt_level;
+    }
 }
 
 void sendExtendedPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData) {
@@ -2579,8 +2584,6 @@ void sendExtendedPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData) {
     if (pan_level == g_last_pan_level && tilt_level == g_last_tilt_level) {
         return;
     }
-    g_last_pan_level = pan_level;
-    g_last_tilt_level = tilt_level;
 
     bool left = pan_level > 0;
     bool right = pan_level < 0;
@@ -2610,7 +2613,10 @@ void sendExtendedPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData) {
 
     if (localDebug) fprintf(stderr, "Sent packet %s\n", fmtbuf(buf, 9));
 
-    send_visca_packet(sock, buf, sizeof(buf), VISCA_ACK_TIMEOUT, false, NULL);
+    if (send_visca_packet(sock, buf, sizeof(buf), VISCA_ACK_TIMEOUT, false, NULL) == 0) {
+        g_last_pan_level = pan_level;
+        g_last_tilt_level = tilt_level;
+    }
 }
 
 void sendManualExposureOverVISCA(int sock) {
@@ -4340,6 +4346,14 @@ void *runNetworkThread(void *argIgnored) {
             if (enable_verbose_debugging || localDebug) {
                 fprintf(stderr, "Done (len = %llu).\n", (unsigned long long)received_length);
             }
+
+            DB_pthread_mutex_lock(&g_networkMutex);
+            if (sock != g_visca_sock) {
+              // The socket changed while the network thread was unlocked (unlikely).  Run away.
+              DB_pthread_mutex_unlock(&g_networkMutex);
+              continue;
+            }
+            DB_pthread_mutex_unlock(&g_networkMutex);
 
             if (received_length > 0) {
               uint8_t *data = (uint8_t *)malloc(received_length);
