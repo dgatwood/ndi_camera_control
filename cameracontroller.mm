@@ -2790,6 +2790,7 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
             return false;
         }
 
+        DB_pthread_mutex_lock(&mutex);
         if (isError) {
           if (localDebug) {
             fprintf(stderr, "Returning error.\n");
@@ -2810,7 +2811,6 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
         if (localDebug) {
           fprintf(stderr, "pthread_cond_signal\n");
         }
-        DB_pthread_mutex_lock(&mutex);
         DB_pthread_cond_signal(&semaphore);
         DB_pthread_mutex_unlock(&mutex);
         return true;
@@ -2858,12 +2858,12 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
         return NULL;
       }
       DB_pthread_mutex_unlock(&mutex);
-      pthread_mutex_destroy(&mutex);
       if (localDebug) {
         fprintf(stderr, "pthread_cond_timedwait done\n");
       }
     }
 
+    pthread_mutex_destroy(&mutex);
     pthread_cond_destroy(&semaphore);
 
     *responseLength = localResponseLength;
@@ -4214,17 +4214,15 @@ int ackType(visca_network_packet_t packet) {
     if (packet->length != 3 + udp_offset) return -1;
     if (!packet->data) return -1;
     if (packet->data[0 + udp_offset] != 0x90 && localDebug) {
-        if (localDebug) fprintf(stderr, "Unexpected ack address 0x%02x\n", packet->data[0 + udp_offset]);
-        return -1;
+        fprintf(stderr, "Unexpected ack address 0x%02x\n", packet->data[0 + udp_offset]);
     }
     uint8_t ack_type = packet->data[1 + udp_offset] >> 4;
-    if (ack_type != 4 && ack_type != 5 && localDebug) {
+    if (ack_type != 4 && ack_type != 5) {
         if (localDebug) fprintf(stderr, "Unexpected ack type 0x%02x\n", packet->data[1 + udp_offset]);
         return -1;
     }
     if (packet->data[2 + udp_offset] != 0xff && localDebug) {
-        if (localDebug) fprintf(stderr, "Unexpected ack trailer 0x%02x\n", packet->data[2 + udp_offset]);
-        return -1;
+        fprintf(stderr, "Unexpected ack trailer 0x%02x\n", packet->data[2 + udp_offset]);
     }
     return ack_type;
 }
