@@ -1050,18 +1050,29 @@ void *runNDIRunLoop(void *receiver_thread_data_ref) {
         if (g_ptzEnabled || enable_visca) {
 #ifdef USE_AVAHI
             if (enable_visca && !visca_use_custom_ip) {
-                int avahi_error = -1;
+                static time_t next_avahi_retry = 0;
+                bool needs_reconnect = false;
                 DB_pthread_mutex_lock(&g_avahiMutex);
                 if (g_avahi_simple_poll != NULL) {
-                    avahi_error = avahi_simple_poll_iterate(g_avahi_simple_poll, 0);
+                    int avahi_error = avahi_simple_poll_iterate(g_avahi_simple_poll, 0);
+                    if (avahi_error != 0) {
+                        // Something went horribly wrong.  Free the references and start over.
+                        g_avahi_service_browser = NULL;
+                        if (g_avahi_client != NULL) {
+                            avahi_client_free(g_avahi_client);
+                            g_avahi_client = NULL;
+                        }
+                        avahi_simple_poll_free(g_avahi_simple_poll);
+                        g_avahi_simple_poll = NULL;
+                        needs_reconnect = true;
+                        next_avahi_retry = time(NULL) + 5;
+                    }
+                } else if (time(NULL) >= next_avahi_retry) {
+                    needs_reconnect = true;
+                    next_avahi_retry = time(NULL) + 5;
                 }
                 DB_pthread_mutex_unlock(&g_avahiMutex);
-                if (avahi_error != 0) {
-                    // Something went horribly wrong.  Just null out the references and start over.
-                    g_avahi_simple_poll = NULL;
-                    g_avahi_client = NULL;
-                    g_avahi_service_browser = NULL;
-
+                if (needs_reconnect) {
                     visca_running = connectVISCA(stream_name, "2");
                 }
             }
@@ -1610,7 +1621,7 @@ bool connectVISCA(char *unsafe_stream_name, const char *context) {
         avahi_client = avahi_client_new(poll,
                                           (AvahiClientFlags)0,
                                           avahi_client_callback,
-                                          NULL,
+                                          avahi_simple_poll,
                                           &error);
         if (!avahi_client) {
             fprintf(stderr, "Failed to create Avahi client (error %d).\n", error);
@@ -1658,10 +1669,13 @@ bool connectVISCA(char *unsafe_stream_name, const char *context) {
     return true;
 }
 
-void avahi_client_callback(AvahiClient *client, AvahiClientState state, AVAHI_GCC_UNUSED void * userdata) {
+void avahi_client_callback(AvahiClient *client, AvahiClientState state, void *userdata) {
     if (state == AVAHI_CLIENT_FAILURE) {
         fprintf(stderr, "Server connection failure: %s\n", avahi_strerror(avahi_client_errno(client)));
-        avahi_simple_poll_quit(g_avahi_simple_poll);
+        AvahiSimplePoll *poll = (AvahiSimplePoll *)userdata ?: g_avahi_simple_poll;
+        if (poll != NULL) {
+            avahi_simple_poll_quit(poll);
+        }
     }
 }
 
@@ -1681,10 +1695,6 @@ void avahi_browse_callback(AvahiServiceBrowser *browser,
             fprintf(stderr, "Avahi browser failed: %s\n",
                     avahi_strerror(avahi_client_errno(avahi_service_browser_get_client(browser))));
             avahi_simple_poll_quit(g_avahi_simple_poll);
-            // Leak on error.
-            g_avahi_simple_poll = NULL;
-            g_avahi_client = NULL;
-            g_avahi_service_browser = NULL;
             return;
         case AVAHI_BROWSER_NEW:
             if (source_name_compare(name, stream_name, true)) {
