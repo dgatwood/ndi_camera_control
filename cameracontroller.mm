@@ -4368,6 +4368,13 @@ void *runNetworkThread(void *argIgnored) {
                 continue;
             }
             visca_network_packet_t packet = g_visca_outdata->head;
+            double now = getVISCATimestamp();
+            while (packet && packet->timestamp < now - 0.5) {
+                if (enable_verbose_debugging || localDebug) {
+                    fprintf(stderr, "Dropping expired outgoing packet\n");
+                }
+                packet = deletePacketFromQueue(packet, g_visca_outdata);
+            }
             if (packet) {
                 if (enable_verbose_debugging || localDebug) {
                     fprintf(stderr, "Sending packet\n");
