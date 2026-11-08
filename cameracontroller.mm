@@ -251,7 +251,7 @@ typedef struct {
     float xAxisPosition;
     float yAxisPosition;
     float zoomPosition;
-    int storePositionNumber;    // Set button is down along with a number button (sent once/debounced).
+    int storePositionNumber;    // Set mode is enabled and a number button is depressed (sent once/debounced).
     int retrievePositionNumber; // A number button is down by itself (sent once/debounced).
     bool setMode;               // True if pushing a button should set the state rather than retrieving it.
     int light[MAX_BUTTONS + 1]; // The current light state (0 .. MAX_BUTTONS)
