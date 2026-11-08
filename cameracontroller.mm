@@ -1963,10 +1963,11 @@ void handleDNSServiceResolveReply(DNSServiceRef sdRef,
         DNSServiceRefDeallocate(g_dnssd_lookupRef);
         g_dnssd_lookupRef = NULL;
     }
-    if (DNSServiceGetAddrInfo(&g_dnssd_lookupRef, 0, interfaceIndex, kDNSServiceProtocol_IPv4, hosttarget, &handleDNSServiceGetAddrInfoReply, context)
-                              != kDNSServiceErr_NoError)
+    DNSServiceErrorType lookupErrorCode =
+        DNSServiceGetAddrInfo(&g_dnssd_lookupRef, 0, interfaceIndex, kDNSServiceProtocol_IPv4, hosttarget, &handleDNSServiceGetAddrInfoReply, context);
+    if (lookupErrorCode != kDNSServiceErr_NoError)
     {
-        fprintf(stderr, "Could not start host resolver for VISCA (error %d)\n", errorCode);
+        fprintf(stderr, "Could not start host resolver for VISCA (error %d)\n", lookupErrorCode);
         g_dnssd_lookupRef = NULL;
         connectVISCA((char *)context, "6");
         DB_pthread_mutex_unlock(&g_dnssd_mutex);
@@ -3623,9 +3624,9 @@ bool cc_gpio_write(unsigned gpio, unsigned level) {
     return set_PWM_dutycycle(g_pig, gpio, level ? dutyCycle(gpio) : 0);
 #else  // USE_MRAA
     if (level) {
-        return set_PWM_dutycycle(g_pig, gpio, dutyCycle(gpio));
+        return set_PWM_dutycycle(g_pig, gpio, dutyCycle(gpio)) == 0;
     } else {
-        return gpio_write(g_pig, gpio, level);
+        return gpio_write(g_pig, gpio, level) == 0;
     }
 #endif  // USE_MRAA
 }
