@@ -3989,18 +3989,19 @@ int gpio_write(int pi, unsigned gpioPin, unsigned level) {
   return mraa_gpio_write(gpio_contexts[gpioPin], level ? 1 : 0) == MRAA_SUCCESS;
 }
 
-int set_mode_sub(int pi, unsigned gpioPin, unsigned mode) {
+bool set_mode_sub(int pi, unsigned gpioPin, unsigned mode) {
   fprintf(stderr, "Initializing pin %d\n", gpioPin);
   if (gpio_contexts[gpioPin] == NULL) {
     gpio_contexts[gpioPin] = mraa_gpio_init(gpioPin);
   }
   if (gpio_contexts[gpioPin] == NULL) {
     fprintf(stderr, "Could not initialize pin %d: unable to create context.\n", gpioPin);
+    return false;
   }
   assert(mode == PI_OUTPUT);
 
-  bool retval = (mraa_gpio_dir(gpio_contexts[gpioPin], MRAA_GPIO_OUT) != MRAA_SUCCESS);
-  if (retval) {
+  bool retval = (mraa_gpio_dir(gpio_contexts[gpioPin], MRAA_GPIO_OUT) == MRAA_SUCCESS);
+  if (!retval) {
     fprintf(stderr, "Could not initialize pin %d: Unable to set direction.\n", gpioPin);
   }
   return retval;
@@ -4010,15 +4011,13 @@ int set_mode_sub(int pi, unsigned gpioPin, unsigned mode) {
 // Unfortunately, when we create a GPIO pin entry, it takes a bit of time for it to get
 // the right group and permissions, so we may have to retry a few times.
 int set_mode(int pi, unsigned gpioPin, unsigned mode) {
-  int retval = 1;
   for (int i = 0; i < 10; i++) {
-    retval = set_mode_sub(pi, gpioPin, mode);
-    if (retval == 0) {
-      return retval;
+    if (set_mode_sub(pi, gpioPin, mode)) {
+      return 0;
     }
     usleep(100000);
   }
-  return retval;
+  return 1;
 }
 
 void *runPWMThread(void *argIgnored) {
@@ -4442,6 +4441,9 @@ void *runNetworkThread(void *argIgnored) {
             if (enable_verbose_debugging || localDebug) {
                 fprintf(stderr, "Calling recvfrom\n");
             }
+            // For weird compatibility reasons, responses have to be accepted from
+            // any IP address and port.  Otherwise, the responses from some commercially
+            // available cameras never arrive.
             received_length = recvfrom(sock, buf, sizeof(buf),
                0, NULL, NULL);
             if (enable_verbose_debugging || localDebug) {
