@@ -536,6 +536,8 @@ void drawOnScreenStats(void);
 bool connectVISCA(char *stream_name, const char *context);
 void sendVISCALoadPreset(uint8_t presetNumber, int sock);
 void sendVISCASavePreset(uint8_t presetNumber, int sock);
+void sendZoomUpdatesOverVISCA(int sock, motionData_t *motionData);
+void sendPanTiltUpdatesOverVISCA(int sock, motionData_t *motionData);
 
 #ifdef DEMO_MODE
     void demoPTZValues(void);
@@ -3734,6 +3736,7 @@ void *runPTZThread(void *argIgnored) {
         usleep(5000);
 #endif  // DEMO_MODE
     }
+    return NULL;
 }
 
 #pragma mark - Source management
