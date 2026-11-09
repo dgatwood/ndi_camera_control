@@ -1,3 +1,5 @@
+#include <cassert>
+#include <cinttypes>
 #include <csignal>
 #include <cstddef>
 #include <cstdio>
@@ -228,7 +230,7 @@ int gMaxPanTiltValue = 0;  // Default is normal VISCA commands.
 #pragma mark - Constants and types
 
 #define safe_asprintf(a, b...) { int retval = asprintf(a, b); \
-                                 assert(retval != -1); }
+                                 if (retval == -1) { perror("asprintf"); abort(); } }
 
 #ifdef __linux__
     #ifndef PAGE_SHIFT
@@ -479,7 +481,8 @@ struct in_addr g_visca_custom_ip;
 bool visca_use_custom_ip = false;
 int g_visca_sock = -1;
 int g_visca_port = 0;
-struct sockaddr_in g_visca_addr;
+struct sockaddr_storage g_visca_addr;
+socklen_t g_visca_addr_len = 0;
 bool g_visca_use_udp = false;
 
 #if __linux__
@@ -1781,13 +1784,25 @@ void avahi_resolve_callback(AvahiServiceResolver *resolver,
                     avahi_strerror(avahi_client_errno(avahi_service_resolver_get_client(resolver))));
             break;
         case AVAHI_RESOLVER_FOUND:
-            if (address->proto == AVAHI_PROTO_INET && g_visca_sock == -1) {
-                struct sockaddr_in sa;
-                bzero(&sa, sizeof(sa));
-                sa.sin_family = AF_INET;
-                sa.sin_port = htons(port);
-                sa.sin_addr.s_addr = address->data.ipv4.address;
-                handleDNSResponse((sockaddr *)&sa);
+            if (g_visca_sock == -1) {
+                if (address->proto == AVAHI_PROTO_INET) {
+                    struct sockaddr_in sa;
+                    bzero(&sa, sizeof(sa));
+                    sa.sin_family = AF_INET;
+                    sa.sin_port = htons(port);
+                    sa.sin_addr.s_addr = address->data.ipv4.address;
+                    handleDNSResponse((sockaddr *)&sa);
+                } else if (address->proto == AVAHI_PROTO_INET6) {
+                    struct sockaddr_in6 sa6;
+                    bzero(&sa6, sizeof(sa6));
+                    sa6.sin6_family = AF_INET6;
+                    sa6.sin6_port = htons(port);
+                    memcpy(&sa6.sin6_addr, &address->data.ipv6.address, sizeof(sa6.sin6_addr));
+                    if (interface > 0) {
+                        sa6.sin6_scope_id = interface;
+                    }
+                    handleDNSResponse((sockaddr *)&sa6);
+                }
             }
             break;
     }
@@ -2022,7 +2037,7 @@ bool connectToVISCAPortWithAddress(const struct sockaddr *address) {
     } else if (address->sa_family == AF_INET6) {
       addr_size = sizeof(struct sockaddr_in6);
     } else {
-      fprintf(stderr, "Ignoring unknown family %d in connectToVISCAPortWithAddress", address->sa_family);
+      fprintf(stderr, "Ignoring unknown family %d in connectToVISCAPortWithAddress\n", address->sa_family);
       return false;
     }
 
@@ -2049,22 +2064,40 @@ bool connectToVISCAPortWithAddress(const struct sockaddr *address) {
 }
 
 int directlyConnectToVISCAPortWithAddress(const struct sockaddr *address) {
-    struct sockaddr_in sa;
-    memcpy((void *)&sa, (void *)address, sizeof(struct sockaddr_in));
-
     // Marshall uses 52381 UDP; PTZOptics uses 5678 TCP or 1259 UDP.
     int port = g_visca_port ?: (g_visca_use_udp ? 1259 : 5678);
 
     if (g_visca_port != 0) {
         fprintf(stderr, "Connecting to custom VISCA port %d\n", port);
     }
-    sa.sin_port = htons(port);
 
-    fprintf(stderr, "Connecting to VISCA port %d on %s\n", ntohs(sa.sin_port), inet_ntoa(sa.sin_addr));
+    struct sockaddr_storage sa;
+    bzero(&sa, sizeof(sa));
+    socklen_t sa_len = 0;
+    char addr_str[INET6_ADDRSTRLEN] = "";
+
+    if (address->sa_family == AF_INET) {
+        sa_len = sizeof(struct sockaddr_in);
+        memcpy(&sa, address, sa_len);
+        struct sockaddr_in *sa4 = (struct sockaddr_in *)&sa;
+        sa4->sin_port = htons(port);
+        inet_ntop(AF_INET, &sa4->sin_addr, addr_str, sizeof(addr_str));
+    } else if (address->sa_family == AF_INET6) {
+        sa_len = sizeof(struct sockaddr_in6);
+        memcpy(&sa, address, sa_len);
+        struct sockaddr_in6 *sa6 = (struct sockaddr_in6 *)&sa;
+        sa6->sin6_port = htons(port);
+        inet_ntop(AF_INET6, &sa6->sin6_addr, addr_str, sizeof(addr_str));
+    } else {
+        fprintf(stderr, "Unsupported address family %d\n", address->sa_family);
+        return -1;
+    }
+
+    fprintf(stderr, "Connecting to VISCA port %d on %s\n", port, addr_str);
 
     int sock = g_visca_use_udp ?
-        socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP) :
-        socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        socket(address->sa_family, SOCK_DGRAM, IPPROTO_UDP) :
+        socket(address->sa_family, SOCK_STREAM, IPPROTO_TCP);
     if (sock == -1) {
         perror("Socket could not be created.");
         return -1;
@@ -2075,12 +2108,23 @@ int directlyConnectToVISCAPortWithAddress(const struct sockaddr *address) {
     struct timeval sendTimeout = { 0, 200000 };
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &sendTimeout, sizeof(sendTimeout));
 
-    struct sockaddr_in sa_recv;
+    struct sockaddr_storage sa_recv;
     bzero(&sa_recv, sizeof(sa_recv));
-    sa_recv.sin_family = AF_INET;
-    sa_recv.sin_addr.s_addr = INADDR_ANY;
-    sa_recv.sin_port = htons(port + 1);
-    if (bind(sock, (sockaddr *)&sa_recv, sizeof(sa_recv)) != 0) {
+    socklen_t sa_recv_len = 0;
+    if (address->sa_family == AF_INET) {
+        struct sockaddr_in *sa_recv4 = (struct sockaddr_in *)&sa_recv;
+        sa_recv4->sin_family = AF_INET;
+        sa_recv4->sin_addr.s_addr = INADDR_ANY;
+        sa_recv4->sin_port = htons(port + 1);
+        sa_recv_len = sizeof(struct sockaddr_in);
+    } else {
+        struct sockaddr_in6 *sa_recv6 = (struct sockaddr_in6 *)&sa_recv;
+        sa_recv6->sin6_family = AF_INET6;
+        sa_recv6->sin6_addr = in6addr_any;
+        sa_recv6->sin6_port = htons(port + 1);
+        sa_recv_len = sizeof(struct sockaddr_in6);
+    }
+    if (bind(sock, (sockaddr *)&sa_recv, sa_recv_len) != 0) {
         perror("Bind failed");
         close(sock);
         return -1;
@@ -2088,9 +2132,10 @@ int directlyConnectToVISCAPortWithAddress(const struct sockaddr *address) {
 
     if (g_visca_use_udp) {
         g_visca_addr = sa;
+        g_visca_addr_len = sa_len;
     } else {
         DB_pthread_mutex_unlock(&g_networkMutex);
-        if (connect(sock, (struct sockaddr *) &sa, sizeof(sa)) == -1) {
+        if (connect(sock, (struct sockaddr *) &sa, sa_len) == -1) {
             perror("Connect failed");
             close(sock);
             DB_pthread_mutex_lock(&g_networkMutex);
@@ -3021,7 +3066,7 @@ int send_visca_packet_raw(int sock, uint8_t *buf, ssize_t bufsize, bool isInquir
         udpbuf[7] = sequenceNumber & 0xff;
         bcopy(buf, udpbuf + 8, bufsize);
         if (sendto(sock, udpbuf, udpbufsize, 0,
-               (sockaddr *)&g_visca_addr, sizeof(struct sockaddr_in)) != udpbufsize) {
+               (sockaddr *)&g_visca_addr, g_visca_addr_len) != udpbufsize) {
             perror("write failed.");
             free(udpbuf);
             return -1;
