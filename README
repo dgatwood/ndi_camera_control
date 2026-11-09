@@ -270,6 +270,8 @@ Usage:
     ./cameracontroller [flags] <camera_name>
 
 where <camera_name> is typically something like "NDIHX-PTZUHD (chan 1, 192.168.100.168)".
+The <camera_name> argument is required (unless running with no arguments at all to list
+available cameras) and must always be the last argument on the command line, after all flags.
 
 Note that this tool searches for a camera with a matching name and IP address first, but then
 falls back to a name match at a different IP.  Be certain that each camera has its own
@@ -310,7 +312,7 @@ VISCA-only features:
 
   -e / --exposure_compensation  -- Sets exposure compensation amount (-5 to 5)
   -a / --auto_exposure          -- Enables automatic exposure (disables -i/-ig/-s).
-  -i / --iris                   -- Sets manual exposure with the specified iris (range 0 to 20).
+  -i / --iris                   -- Sets manual exposure with the specified iris (range 0 to 15).
                                    The meaning of these values is camera-dependent.
   -g / --gain                   -- Sets manual exposure with the specified gain (range 0 to 15).
                                    The meaning of these values is camera-dependent.

@@ -632,11 +632,16 @@ int main(int argc, char *argv[]) {
 
     char *stream_name = argv[argc - 1];
     if (argc < 2) {
-        fprintf(stderr, "Usage: camera_control \"stream name\"\n");
+        fprintf(stderr, "Usage: cameracontroller [flags] \"stream name\"\n");
         fprintf(stderr, "Known sources (polling for 5 seconds):\n");
         stream_name = NULL;
+    } else if (stream_name[0] == '-') {
+        fprintf(stderr, "Error: Stream name is required and must be the last argument.\n");
+        fprintf(stderr, "Usage: cameracontroller [flags] \"stream name\"\n");
+        return 1;
     }
-    for (int i = 1; i < argc - 1; i++) {
+    int i;
+    for (i = 1; i < argc - 1; i++) {
         if (!strcmp(argv[i], "-d") || !strcmp(argv[i], "--debug")) {
             fprintf(stderr, "Enabling debugging (slow).\n");
             enable_debugging = true;
@@ -644,7 +649,7 @@ int main(int argc, char *argv[]) {
 #ifdef __linux__
         if (!strcmp(argv[i], "-D") || !strcmp(argv[i], "--duty_cycle")) {
             fprintf(stderr, "Setting LED brightness.\n");
-            if (argc > i + 1) {
+            if (argc - 1 > i + 1) {
                 long requested_duty_cycle = atoi(argv[i+1]);
                 if (requested_duty_cycle >= 0 &&
                     requested_duty_cycle <= 255) {
@@ -653,6 +658,9 @@ int main(int argc, char *argv[]) {
                     fprintf(stderr, "Invalid duty cycle %ld.  (Valid range: 0 to 255)\n", requested_duty_cycle);
                 }
                 i++;
+            } else {
+                fprintf(stderr, "Error: %s requires a value and stream name must be the last argument.\n", argv[i]);
+                return 1;
             }
         }
 #endif  // __linux__
@@ -666,11 +674,12 @@ int main(int argc, char *argv[]) {
 #ifdef ENABLE_PAN_TILT_SPEED_COMPENSATION
         if (!strcmp(argv[i], "-m") || !strcmp(argv[i], "--maxzoom")) {
             fprintf(stderr, "Enabling button debugging.\n");
-            if (argc > i + 1) {
+            if (argc - 1 > i + 1) {
                 g_max_zoom = atof(argv[i+1]);
                 i++;
             } else {
-                fprintf(stderr, "-m / --maxzoom flag takes an argument");
+                fprintf(stderr, "Error: -m / --maxzoom flag takes an argument and stream name must be the last argument.\n");
+                return 1;
             }
         }
 #endif  // ENABLE_PAN_TILT_SPEED_COMPENSATION
@@ -713,9 +722,12 @@ int main(int argc, char *argv[]) {
         // and shutter speed.  Ugh.
         if (!strcmp(argv[i], "-e") || !strcmp(argv[i], "--exposure_compensation")) {
             int val = 0;
-            if (argc > i + 1) {
+            if (argc - 1 > i + 1) {
                 val = atoi(argv[i+1]);
                 i++;
+            } else {
+                fprintf(stderr, "Error: %s requires a value and stream name must be the last argument.\n", argv[i]);
+                return 1;
             }
             if (val > 5 || val < -5) {
                 fprintf(stderr, "Invalid exposure compentation %d.  (Valid range: -5 to 5)\n", val);
@@ -733,9 +745,12 @@ int main(int argc, char *argv[]) {
         }
         if (!strcmp(argv[i], "-i") || !strcmp(argv[i], "--iris")) {
             int val = 0;
-            if (argc > i + 1) {
+            if (argc - 1 > i + 1) {
                 val = atoi(argv[i+1]);
                 i++;
+            } else {
+                fprintf(stderr, "Error: %s requires a value and stream name must be the last argument.\n", argv[i]);
+                return 1;
             }
             if (val > 15 || val < 0) {
                 fprintf(stderr, "Invalid manual iris %d.  (Valid range: 0 to 15)\n", val);
@@ -750,9 +765,12 @@ int main(int argc, char *argv[]) {
 
         if (!strcmp(argv[i], "-g") || !strcmp(argv[i], "--gain")) {
             int val = 0;
-            if (argc > i + 1) {
+            if (argc - 1 > i + 1) {
                 val = atoi(argv[i+1]);
                 i++;
+            } else {
+                fprintf(stderr, "Error: %s requires a value and stream name must be the last argument.\n", argv[i]);
+                return 1;
             }
             if (val > 15 || val < 0) {
                 fprintf(stderr, "Invalid manual gain %d.  (Valid range: 0 to 15)\n", val);
@@ -767,9 +785,12 @@ int main(int argc, char *argv[]) {
 
         if (!strcmp(argv[i], "-s") || !strcmp(argv[i], "--shutter")) {
             int val = 0;
-            if (argc > i + 1) {
+            if (argc - 1 > i + 1) {
                 val = atoi(argv[i+1]);
                 i++;
+            } else {
+                fprintf(stderr, "Error: %s requires a value and stream name must be the last argument.\n", argv[i]);
+                return 1;
             }
             if (val > 21 || val < 0) {
                 fprintf(stderr, "Invalid manual shutter %d.  (Valid range: 0 to 21)\n", val);
@@ -783,20 +804,26 @@ int main(int argc, char *argv[]) {
         }
 #endif  // USE_VISCA_FOR_EXPOSURE_COMPENSATION
         if (!strcmp(argv[i], "-p") || !strcmp(argv[i], "--visca_port")) {
-            if (argc > i + 1) {
+            if (argc - 1 > i + 1) {
               enable_visca = true;
               g_visca_port = atoi(argv[i+1]);
               i++;
+            } else {
+              fprintf(stderr, "Error: %s requires a value and stream name must be the last argument.\n", argv[i]);
+              return 1;
             }
             fprintf(stderr, "Using port %d for VISCA.\n", g_visca_port);
         }
         if (!strcmp(argv[i], "-I") || !strcmp(argv[i], "--visca_ip")) {
-            if (argc > i + 1) {
+            if (argc - 1 > i + 1) {
               enable_visca = true;
               if (inet_aton(argv[i+1], &g_visca_custom_ip)) {
                   visca_use_custom_ip = true;
               }
               i++;
+            } else {
+              fprintf(stderr, "Error: %s requires a value and stream name must be the last argument.\n", argv[i]);
+              return 1;
             }
             if (visca_use_custom_ip) {
                 fprintf(stderr, "Using ip address %s for VISCA.\n", inet_ntoa(g_visca_custom_ip));
