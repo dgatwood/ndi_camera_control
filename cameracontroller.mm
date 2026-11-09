@@ -135,9 +135,6 @@ void *runPWMThread(void *argIgnored);
 
 #undef DEMO_MODE
 
-// This must be set correctly in Linux, because the NDI library is bizarre.
-#define NDI_LIBRARY_PATH "/usr/local/NDISDK/lib/arm-rpi3-linux-gnueabihf/libndi.so.4"
-
 #include "LightConfiguration.h"
 
 #ifdef USE_ROCKPI_PINOUTS
@@ -681,6 +678,10 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Enabling PTZ debugging.\n");
             enable_ptz_debugging = true;
         }
+        if (!strcmp(argv[i], "-B") || !strcmp(argv[i], "--buttondebug")) {
+            fprintf(stderr, "Enabling button debugging.\n");
+            enable_button_debugging = true;
+        }
         if (!strcmp(argv[i], "-R") || !strcmp(argv[i], "--use_visca_for_store_and_recall")) {
             fprintf(stderr, "Enabling VISCA store and recall.\n");
             use_visca_for_presets = true;
@@ -832,35 +833,19 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), queue, ^{
 #endif  // __linux__
 
-        std::string ndi_path;
-
-        // Try to look up the NDI SDK shared library.
-        const char *p_NDI_runtime_folder = ::getenv("NDI_RUNTIME_DIR_V4");
-        if (p_NDI_runtime_folder) {
-            ndi_path = p_NDI_runtime_folder;
-            ndi_path += "/libndi.dylib";
-        } else {
-#ifdef __linux__
-            ndi_path = NDI_LIBRARY_PATH;
-#else  // ! __linux__
-            ndi_path = "libndi.4.dylib";
-#endif  // __linux__
-        }
-
-        if (!NDIlib_initialize()) {
-            printf("The NDI library could not be initialized.");
-            exit(1);
-        }
-
         // Run the shared library initialization function (boilerplate NDI SDK code).
         const NDIlib_v3 *p_NDILib = NDIlib_v4_load();
+        if (!p_NDILib) {
+            fprintf(stderr, "The NDI library could not be loaded.\n");
+            exit(1);
+        }
 
         // Initialize the NDI library (boilerplate NDI SDK code).
         if (!p_NDILib->NDIlib_initialize())
         {
-            // NDI is not supported- nost likely because the CPU is not sufficient (see SDK documentation).
+            // NDI is not supported - most likely because the CPU is not sufficient (see SDK documentation).
             // You can check this directly by calling NDIlib_is_supported_CPU().
-            printf("Cannot run NDI.");
+            fprintf(stderr, "Cannot run NDI.\n");
             exit(1);
         }
 
@@ -1786,25 +1771,23 @@ void avahi_resolve_callback(AvahiServiceResolver *resolver,
                     avahi_strerror(avahi_client_errno(avahi_service_resolver_get_client(resolver))));
             break;
         case AVAHI_RESOLVER_FOUND:
-            if (g_visca_sock == -1) {
-                if (address->proto == AVAHI_PROTO_INET) {
-                    struct sockaddr_in sa;
-                    bzero(&sa, sizeof(sa));
-                    sa.sin_family = AF_INET;
-                    sa.sin_port = htons(port);
-                    sa.sin_addr.s_addr = address->data.ipv4.address;
-                    handleDNSResponse((sockaddr *)&sa);
-                } else if (address->proto == AVAHI_PROTO_INET6) {
-                    struct sockaddr_in6 sa6;
-                    bzero(&sa6, sizeof(sa6));
-                    sa6.sin6_family = AF_INET6;
-                    sa6.sin6_port = htons(port);
-                    memcpy(&sa6.sin6_addr, &address->data.ipv6.address, sizeof(sa6.sin6_addr));
-                    if (interface > 0) {
-                        sa6.sin6_scope_id = interface;
-                    }
-                    handleDNSResponse((sockaddr *)&sa6);
+            if (address->proto == AVAHI_PROTO_INET) {
+                struct sockaddr_in sa;
+                bzero(&sa, sizeof(sa));
+                sa.sin_family = AF_INET;
+                sa.sin_port = htons(port);
+                sa.sin_addr.s_addr = address->data.ipv4.address;
+                handleDNSResponse((sockaddr *)&sa);
+            } else if (address->proto == AVAHI_PROTO_INET6) {
+                struct sockaddr_in6 sa6;
+                bzero(&sa6, sizeof(sa6));
+                sa6.sin6_family = AF_INET6;
+                sa6.sin6_port = htons(port);
+                memcpy(&sa6.sin6_addr, &address->data.ipv6.address, sizeof(sa6.sin6_addr));
+                if (interface > 0) {
+                    sa6.sin6_scope_id = interface;
                 }
+                handleDNSResponse((sockaddr *)&sa6);
             }
             break;
     }
@@ -2022,7 +2005,14 @@ void handleDNSServiceGetAddrInfoReply(DNSServiceRef sdRef,
         fprintf(stderr, "VISCA ready.\n");
 
         DB_pthread_mutex_lock(&g_dnssd_mutex);
-        stopDNSSDResolving();  // Destroys context
+        if (g_dnssd_resolveRef) {
+            DNSServiceRefDeallocate(g_dnssd_resolveRef);
+            g_dnssd_resolveRef = NULL;
+        }
+        if (g_dnssd_lookupRef) {
+            DNSServiceRefDeallocate(g_dnssd_lookupRef);
+            g_dnssd_lookupRef = NULL;
+        }
         DB_pthread_mutex_unlock(&g_dnssd_mutex);
         return;
     }
@@ -2043,14 +2033,20 @@ bool connectToVISCAPortWithAddress(const struct sockaddr *address) {
       return false;
     }
 
+    DB_pthread_mutex_lock(&g_networkMutex);
+    if (g_visca_sock != -1 && g_visca_sockaddr != NULL &&
+        g_visca_sockaddr->sa_family == address->sa_family &&
+        memcmp(g_visca_sockaddr, address, addr_size) == 0) {
+        DB_pthread_mutex_unlock(&g_networkMutex);
+        return true;
+    }
+
     // NewTek's cameras are buggy.  They respond with UDP packets from a different source
     // port than the port we send to, which makes connected UDP sockets impossible.  This
     // sucks from a performance perspective, but we work around it by not connecting the
     // socket.
     struct sockaddr *copiedAddress = (struct sockaddr *)malloc(addr_size);
     memcpy((void *)copiedAddress, (void *)address, addr_size);
-
-    DB_pthread_mutex_lock(&g_networkMutex);
 
     struct sockaddr *oldAddress = g_visca_sockaddr;
     g_visca_sockaddr = copiedAddress;
@@ -2477,9 +2473,17 @@ void updateTallyLightsOverVISCA(int sock) {
     // 81 09 7E 01 0A FF (red check) -> 90 50 0p FF where p is 2 (on) or 3 (off)
     // 81 09 7E 04 1A FF (green check) -> 90 50 0p FF where p is 2 (on) or 3 (off)
 
+    static int tallyFailCount = 0;
+    if (sock == -1) {
+        g_camera_active = false;
+        g_camera_preview = false;
+        return;
+    }
+
     ssize_t responseLength = 0;
     uint8_t *responseBuf = send_visca_inquiry(sock, buf, sizeof(buf), 20000, &responseLength);
     if (responseBuf && responseLength == 4 && responseBuf[1] == 0x50 && responseBuf[3] == 0xff) {
+        tallyFailCount = 0;
         if (enable_verbose_debugging) {
             fprintf(stderr, "Got tally data: %s\n", fmtbuf(responseBuf, responseLength));
         }
@@ -2496,6 +2500,10 @@ void updateTallyLightsOverVISCA(int sock) {
         } else {
             fprintf(stderr, "Unknown tally mode %d\n", tallyMode);
         }
+    } else if (++tallyFailCount >= 10) {
+        // Give up after 10 seconds without a response from the camera.
+        g_camera_active = false;
+        g_camera_preview = false;
     }
     free(responseBuf);
 }
@@ -3258,11 +3266,13 @@ int recallSpeedVISCA(void) {
  *        Unless you have a good reason to do otherwise, your hardware should
  *        be built to generate positive and negative values accordingly.
  */
-float readAxisPosition(int axis) {
+float readAxisPosition(int axis, float previousValue) {
     #ifndef ENABLE_FILES_FOR_BUTTON_TESTING
         if (!io_expander) return 0;
         int pin = pinNumberForAxis(axis);
-        int rawValue = input(io_expander, pin, 0.001) - 2048;
+        int adcValue = input(io_expander, pin, 0.001);
+        if (adcValue < 0) return previousValue;
+        int rawValue = adcValue - 2048;
         return scaleAxisValue(axis, rawValue);
     #else  // ENABLE_FILES_FOR_BUTTON_TESTING
         bool localDebug = false;
@@ -3309,6 +3319,9 @@ bool readButton(int buttonNumber, motionData_t *motionData) {
         if (!io_expander) return 0;
         int pin = pinNumberForButton(buttonNumber);
         int rawValue = input(io_expander, pin, 0.001);
+        if (rawValue < 0) {
+            return motionData->currentValue[buttonNumber];
+        }
         bool value = (rawValue == LOW);  // If logic low (grounded), return true.
 
         if (enable_button_debugging) {
@@ -3396,9 +3409,9 @@ void updatePTZValues() {
     motionData_t newMotionData = getMotionData();
 
     // Update the analog axis values.
-    newMotionData.xAxisPosition = readAxisPosition(kPTZAxisX);
-    newMotionData.yAxisPosition = readAxisPosition(kPTZAxisY);
-    newMotionData.zoomPosition = readAxisPosition(kPTZAxisZoom);
+    newMotionData.xAxisPosition = readAxisPosition(kPTZAxisX, newMotionData.xAxisPosition);
+    newMotionData.yAxisPosition = readAxisPosition(kPTZAxisY, newMotionData.yAxisPosition);
+    newMotionData.zoomPosition = readAxisPosition(kPTZAxisZoom, newMotionData.zoomPosition);
     if (enable_ptz_debugging) {
         fprintf(stderr, "\n");
     }
@@ -3671,15 +3684,30 @@ uint8_t dutyCycle(int pin) {
 // A variant of gpio_write that automatically sets a
 // duty cycle on the pin instead of just turning it on.
 bool cc_gpio_write(unsigned gpio, unsigned level) {
+    static int last_level[64] = {
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1
+    };
+    int normalized_level = level ? 1 : 0;
+    if (gpio < 64 && last_level[gpio] == normalized_level) {
+        return true;
+    }
 #if USE_MRAA
-    return set_PWM_dutycycle(g_pig, gpio, level ? dutyCycle(gpio) : 0);
+    bool ok = set_PWM_dutycycle(g_pig, gpio, level ? dutyCycle(gpio) : 0);
 #else  // USE_MRAA
+    bool ok;
     if (level) {
-        return set_PWM_dutycycle(g_pig, gpio, dutyCycle(gpio)) == 0;
+        ok = (set_PWM_dutycycle(g_pig, gpio, dutyCycle(gpio)) == 0);
     } else {
-        return gpio_write(g_pig, gpio, level) == 0;
+        ok = (gpio_write(g_pig, gpio, level) == 0);
     }
 #endif  // USE_MRAA
+    if (ok && gpio < 64) {
+        last_level[gpio] = normalized_level;
+    }
+    return ok;
 }
 #endif // __linux__
 
@@ -3749,7 +3777,9 @@ void free_receiver_item(receiver_array_item_t receiver_item) {
 }
 
 void truncate_name_before_ip(char *name) {
-    for (char *pos = &name[strlen(name) - 1] ; pos >= name; pos--) {
+    ssize_t len = strlen(name);
+    if (len == 0) return;
+    for (char *pos = &name[len - 1] ; pos >= name; pos--) {
         if (*pos == ',') {
             *pos = '\0';
             break;
