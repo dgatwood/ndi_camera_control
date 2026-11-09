@@ -1029,6 +1029,27 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
         p_NDILib->NDIlib_destroy();
 
 #ifdef __linux__
+#ifdef USE_MRAA
+        pthread_join(newSoftPWMThread, NULL);
+#else
+#ifndef DEMO_MODE
+        if (!g_use_on_screen_lights) {
+            cc_gpio_write(LED_PIN_WHITE, 0);
+            cc_gpio_write(LED_PIN_RED, 0);
+            cc_gpio_write(LED_PIN_YELLOW, 0);
+            cc_gpio_write(LED_PIN_GREEN, 0);
+            cc_gpio_write(LED_PIN_BLUE, 0);
+            cc_gpio_write(LED_PIN_PURPLE, 0);
+            cc_gpio_write(LED_PIN_RGB_RED, 0);
+            cc_gpio_write(LED_PIN_RGB_GREEN, 0);
+            cc_gpio_write(LED_PIN_RGB_BLUE, 0);
+        }
+#endif  // !DEMO_MODE
+        if (g_pig >= 0) {
+            pigpio_stop(g_pig);
+            g_pig = -1;
+        }
+#endif  // USE_MRAA
         cleanupFrameBuffer();
 #else
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -1357,6 +1378,11 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
         if (tempBuf == NULL) {
             tempBuf = (unsigned char *)mmap(0, screenSize, PROT_READ | PROT_WRITE,
                                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (tempBuf == MAP_FAILED) {
+                perror("cameracontroller: mmap");
+                tempBuf = NULL;
+                return false;
+            }
         }
         if (g_xScaleFactor == 1.0 && g_yScaleFactor == 1.0 && monitor_bytes_per_pixel == 4 &&
             !monitor_flipped && !force_slow_path) {
@@ -1415,13 +1441,6 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
     }
 
     void cleanupFrameBuffer(void) {
-
-        if (ioctl(g_framebufferFileHandle, FBIOPUT_VSCREENINFO, &g_initialFramebufferConfiguration) == -1) {
-            fprintf(stderr, "Ioctl FBIOPUT_VSCREENINFO error.\n");
-        }
-        if (ioctl(g_framebufferFileHandle, FBIOGET_FSCREENINFO, &g_framebufferFixedConfiguration) == -1) {
-            fprintf(stderr, "Ioctl FBIOGET_FSCREENINFO.\n");
-        }
         if (g_framebufferMemory != NULL) {
             munmap(g_framebufferMemory, g_framebufferMapLength);
             g_framebufferMemory = NULL;
@@ -1429,7 +1448,16 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
             g_framebufferBase = NULL;
             g_framebufferActiveMemory = NULL;
         }
-        close(g_framebufferFileHandle);
+        if (g_framebufferFileHandle != -1) {
+            if (ioctl(g_framebufferFileHandle, FBIOPUT_VSCREENINFO, &g_initialFramebufferConfiguration) == -1) {
+                fprintf(stderr, "Ioctl FBIOPUT_VSCREENINFO error.\n");
+            }
+            if (ioctl(g_framebufferFileHandle, FBIOGET_FSCREENINFO, &g_framebufferFixedConfiguration) == -1) {
+                fprintf(stderr, "Ioctl FBIOGET_FSCREENINFO.\n");
+            }
+            close(g_framebufferFileHandle);
+            g_framebufferFileHandle = -1;
+        }
     }
 
 #else  // ! __linux__
@@ -2297,16 +2325,26 @@ void updatePanTiltPositionOverVISCA(int sock) {
         fprintf(stderr, "Getting pan and tilt position.\n");
     }
     uint8_t *responseBuf = send_visca_inquiry(sock, buf, sizeof(buf), 20000, &responseLength);
-    if (responseBuf && responseLength == 11 && responseBuf[1] == 0x50 && responseBuf[10] == 0xff) {
+    if (responseBuf && (responseLength == 11 || responseLength == 13) &&
+        responseBuf[1] == 0x50 && responseBuf[responseLength - 1] == 0xff) {
         if (enable_verbose_debugging) {
             fprintf(stderr, "Got pan and tilt position data: %s\n", fmtbuf(responseBuf, responseLength));
         }
-        int rawPanValue = ((responseBuf[2] & 0xf) << 12) | ((responseBuf[3] & 0xf) << 8) |
-            ((responseBuf[4] & 0xf) << 4) | (responseBuf[5] & 0xf);
-        int rawTiltValue = ((responseBuf[6] & 0xf) << 12) | ((responseBuf[7] & 0xf) << 8) |
-            ((responseBuf[8] & 0xf) << 4) | (responseBuf[9] & 0xf);
-        gCurrentPanPosition = (double)rawPanValue / (double)0xFFFF;
-        gCurrentTiltPosition = (double)rawTiltValue / (double)0xFFFF;
+        if (responseLength == 11) {
+            int rawPanValue = ((responseBuf[2] & 0xf) << 12) | ((responseBuf[3] & 0xf) << 8) |
+                ((responseBuf[4] & 0xf) << 4) | (responseBuf[5] & 0xf);
+            int rawTiltValue = ((responseBuf[6] & 0xf) << 12) | ((responseBuf[7] & 0xf) << 8) |
+                ((responseBuf[8] & 0xf) << 4) | (responseBuf[9] & 0xf);
+            gCurrentPanPosition = (double)rawPanValue / (double)0xFFFF;
+            gCurrentTiltPosition = (double)rawTiltValue / (double)0xFFFF;
+        } else {
+            int rawPanValue = ((responseBuf[2] & 0xf) << 16) | ((responseBuf[3] & 0xf) << 12) |
+                ((responseBuf[4] & 0xf) << 8) | ((responseBuf[5] & 0xf) << 4) | (responseBuf[6] & 0xf);
+            int rawTiltValue = ((responseBuf[7] & 0xf) << 16) | ((responseBuf[8] & 0xf) << 12) |
+                ((responseBuf[9] & 0xf) << 8) | ((responseBuf[10] & 0xf) << 4) | (responseBuf[11] & 0xf);
+            gCurrentPanPosition = (double)rawPanValue / (double)0xFFFFF;
+            gCurrentTiltPosition = (double)rawTiltValue / (double)0xFFFFF;
+        }
     } else {
         fprintf(stderr, "Bad response %s for pan/tilt position value (length %" PRId64 ").\n",
             fmtbuf(responseBuf, responseLength), (uint64_t)responseLength);
@@ -2545,10 +2583,11 @@ void sendVISCASavePreset(uint8_t presetNumber, int sock) {
 void sendZoomUpdatesOverVISCA(int sock, motionData_t *motionData) {
     if (gMaxZoomValue != 8) {
         // Use a nonstandard VISCA command with a much larger zoom speed range.
+        // NOTE: Do NOT check or apply g_fudge_zoom in this branch.  g_fudge_zoom is a
+        // workaround strictly for third-party cameras using standard 8-level VISCA zoom;
+        // applying it here could cause bugs and will not fix any.
         uint8_t buf[8] = { 0x81, 0x01, 0x04, 0x07, 0x00, 0x00, 0x00, 0xFF };
         int level = (int)(motionData->zoomPosition * (gMaxZoomValue + 0.9));
-
-        static int count = 0;
 
         if (level == g_last_zoom_level) {
             return;
@@ -2812,7 +2851,7 @@ void sendExposureCompensationOverVISCA(int sock) {
 
 bool get_ack(int sock, uint32_t sequence_number, int timeout_usec);
 
-ssize_t get_expected_response_length(uint8_t *buf, ssize_t bufsize) {
+bool is_valid_response_length(uint8_t *buf, ssize_t bufsize, ssize_t responseLength) {
   bool valid = (bufsize > 2 && buf[0] == 0x81 && buf[1] == 0x09 && buf[bufsize - 1] == 0xFF);
 
   if (valid) {
@@ -2820,29 +2859,31 @@ ssize_t get_expected_response_length(uint8_t *buf, ssize_t bufsize) {
       case 5: /* Queries of length 5 */
         if (buf[2] == 0x04) {
           if (buf[3] == 0x07) {
-                return 13;
+                return responseLength == 13;
           } else if (buf[3] == 0x46) {
-                return 7;
+                return responseLength == 7;
           } else if (buf[3] == 0x47) {
-                return 7;
+                return responseLength == 7;
           }
         } else if (buf[2] == 0x06 && buf[3] == 0x12) {
-          return 13;
+          // Standard VISCA CAM_Pan-TiltPosInq uses 4 nibbles per axis (11 bytes total),
+          // while extended-precision cameras use 5 nibbles per axis (13 bytes total).
+          return responseLength == 11 || responseLength == 13;
         }
         break;
 
       case 6: /* Queries of length 6 */
         if (buf[2] == 0x7E) {
           if (buf[3] == 0x01 && buf[4] == 0x0A) {
-            return 4;
+            return responseLength == 4;
           } else if (buf[3] == 0x04 && buf[4] == 0x1A) {
-            return 4;
+            return responseLength == 4;
           }
         }
         break;
       case 7: /* Queries of length 7 */
         if (buf[2] == 0x7E && buf[3] == 0x01 && buf[4] == 0x0A && buf[5] == 0x01) {
-          return 4;
+          return responseLength == 4;
         }
         break;
       default:
@@ -2854,7 +2895,7 @@ ssize_t get_expected_response_length(uint8_t *buf, ssize_t bufsize) {
 
   fprintf(stderr, "Unable to determine expected response length for inquiry %s\n", fmtbuf(buf, bufsize));
 
-  return 0;
+  return false;
 }
 
 uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout_usec, ssize_t *responseLength) {
@@ -2862,8 +2903,6 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
 
     *responseLength = 0;
     if (sock == -1) return NULL;
-
-    const int expectedLength = get_expected_response_length(buf, bufsize);
 
     __block pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
     __block pthread_cond_t semaphore = PTHREAD_COND_INITIALIZER;
@@ -2905,10 +2944,10 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
 
         // Verify that the packet length makes sense or that it is an error packet.
         bool isError = false;
-        if (packet->length != (expectedLength + udp_offset)) {
+        if (!is_valid_response_length(buf, bufsize, packet->length - udp_offset)) {
             if (localDebug) {
-              fprintf(stderr, "In packetResponseHandler expected length %lld got %lld\n",
-                  (long long)expectedLength + udp_offset, (long long)packet->length);
+              fprintf(stderr, "In packetResponseHandler unexpected payload length %lld\n",
+                  (long long)(packet->length - udp_offset));
               fprintf(stderr, "Command:  %s\n", fmtbuf(buf, bufsize));
               fprintf(stderr, "Response: %s\n", fmtbuf(packet->data, packet->length));
             }
