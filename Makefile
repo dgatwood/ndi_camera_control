@@ -20,7 +20,7 @@ endif  # Darwin
 ifeq ($(UNAME), Linux)
 CFLAGS+=-fblocks
 CXXFLAGS+=-I/usr/local/NDISDK/include/ -g -O0 -fblocks
-LDFLAGS+=-fuse-ld=lld -lndi -ldl -lpthread -lavahi-client -lavahi-common -lobjc -lBlocksRuntime
+LDFLAGS+=-fuse-ld=lld -L/usr/local/lib/ -lndi -ldl -lpthread -lavahi-client -lavahi-common -lobjc -lBlocksRuntime
 # -I/usr/include/GNUstep -lgnustep-gui
 
 ifeq ($(ARCH), unknown)
