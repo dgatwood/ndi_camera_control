@@ -4,11 +4,11 @@
 #include <cstddef>
 #include <cstdio>
 #include <atomic>
-#include <stdatomic.h>
 #include <chrono>
 #include <semaphore.h>
 #include <string>
 #include <thread>
+#include <stdatomic.h>
 
 #include <math.h>
 #include <sys/ioctl.h>
@@ -30,10 +30,6 @@
 #include <pthread.h>
 
 #include <Block.h>
-
-#ifndef NSEC_PER_SEC
-#define NSEC_PER_SEC 1000000000
-#endif
 
 extern "C" {
 #ifdef USE_TFBLIB
@@ -174,6 +170,10 @@ void *runPWMThread(void *argIgnored);
 
     #define ENABLE_FILES_FOR_BUTTON_TESTING
 #endif  // __linux__
+
+#ifndef NSEC_PER_SEC
+#define NSEC_PER_SEC 1000000000
+#endif
 
 #include "ioexpander.c"
 
