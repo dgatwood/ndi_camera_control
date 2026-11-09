@@ -2230,14 +2230,12 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
 // nonstandard command specific to the VISCAPTZ project.  On all actual VISCA devices, this will fail,
 // hence the large response packet with known values.
 void updateVISCAMaxSpeed(int sock) {
-    static struct timeval lastCheck = { 0, 0 };
-    struct timeval curTime;
-
-    gettimeofday(&curTime, NULL);
+    static double lastCheck = 0;
+    double curTime = getVISCATimestamp();
 
     // This should never change, but we need to keep trying until we get a valid result, and it
     // isn't worth stopping the polling after we do.
-    if ((curTime.tv_sec - lastCheck.tv_sec) < 5) return;
+    if (lastCheck != 0 && (curTime - lastCheck) < 5.0) return;
 
     // No point in trying if the socket is bogus.
     if (sock == -1) return;
@@ -2391,8 +2389,7 @@ void updateZoomPositionOverVISCA(int sock) {
 }
 
 bool updateZoomPositionOverVISCA(int sock, bool digitalMode) {
-    static struct timeval lastCheck = { 0, 0 };
-    struct timeval curTime;
+    static double lastCheck = 0;
 
     static double lastZoomPosition = 0;
     static int zoomMessageFailCount = 0;
@@ -2402,13 +2399,8 @@ bool updateZoomPositionOverVISCA(int sock, bool digitalMode) {
     static int minSuccessToIgnore = 1000000 / MIN_TALLY_INTERVAL;  // One second.
     static int minFailureToIgnore = 50000 / MIN_TALLY_INTERVAL;  // 50 ms.
 
-
-    gettimeofday(&curTime, NULL);
-
-    uint64_t difference = (curTime.tv_usec - lastCheck.tv_usec) +
-        ((curTime.tv_sec != lastCheck.tv_sec) ? 1000000 : 0);
-
-    if (difference < MIN_TALLY_INTERVAL) return true;
+    double curTime = getVISCATimestamp();
+    if ((curTime - lastCheck) < (MIN_TALLY_INTERVAL / 1000000.0)) return true;
     lastCheck = curTime;
 
     uint8_t buf[5] = { 0x81, 0x09, 0x04, 0x47, 0xFF };
@@ -2483,15 +2475,10 @@ bool updateZoomPositionOverVISCA(int sock, bool digitalMode) {
 #endif
 
 void updateTallyLightsOverVISCA(int sock) {
-    static struct timeval lastCheck = { 0, 0 };
-    struct timeval curTime;
+    static double lastCheck = 0;
+    double curTime = getVISCATimestamp();
 
-    gettimeofday(&curTime, NULL);
-
-    uint64_t difference = (curTime.tv_usec - lastCheck.tv_usec) +
-        ((curTime.tv_sec != lastCheck.tv_sec) ? 1000000 : 0);
-
-    if (difference < MIN_TALLY_INTERVAL) return;
+    if ((curTime - lastCheck) < (MIN_TALLY_INTERVAL / 1000000.0)) return;
     lastCheck = curTime;
 
     uint8_t buf[7] = { 0x81, 0x09, 0x7E, 0x01, 0x0A, 0x01, 0xFF };
@@ -3174,8 +3161,9 @@ bool get_ack(int sock, uint32_t sequence_number, int timeout_usec) {
 
 #pragma mark - PTZ Core
 
+motionData_t consumeMotionDataForNDI(void);
 void sendPTZUpdates(NDIlib_recv_instance_t pNDI_recv) {
-    motionData_t copyOfMotionData = getMotionData();
+    motionData_t copyOfMotionData = consumeMotionDataForNDI();
 
     // We want to send a "set position X" or "retrieve position X" message only once.  To do this, we
     // keep track of the last set/retrieve command sent, and if the value hasn't changed, we zero
@@ -3744,9 +3732,20 @@ void setMotionData(motionData_t newMotionData) {
     /*
      * Lock the motion data mutex and update the motion data so that the NDI code
      * running on the main thread can send it to the camera.
+     *
+     * Preserve any rising-edge button press until the NDI thread consumes it,
+     * so a button press shorter than one video frame is not lost.
      */
     DB_pthread_mutex_lock(&g_motionMutex);
+    int prevStore = g_motionData.storePositionNumber;
+    int prevRetrieve = g_motionData.retrievePositionNumber;
     g_motionData = newMotionData;
+    if (newMotionData.storePositionNumber == 0 && prevStore > 0) {
+        g_motionData.storePositionNumber = prevStore;
+    }
+    if (newMotionData.retrievePositionNumber == 0 && prevRetrieve > 0) {
+        g_motionData.retrievePositionNumber = prevRetrieve;
+    }
     DB_pthread_mutex_unlock(&g_motionMutex);
 }
 
@@ -3758,6 +3757,20 @@ motionData_t getMotionData() {
      */
     DB_pthread_mutex_lock(&g_motionMutex);
     newMotionData = g_motionData;
+    DB_pthread_mutex_unlock(&g_motionMutex);
+    return newMotionData;
+}
+
+motionData_t consumeMotionDataForNDI() {
+    motionData_t newMotionData;
+    DB_pthread_mutex_lock(&g_motionMutex);
+    newMotionData = g_motionData;
+    if (! newMotionData.currentValue[newMotionData.storePositionNumber]) {
+        g_motionData.storePositionNumber = 0;
+    }
+    if (! newMotionData.currentValue[newMotionData.retrievePositionNumber]) {
+        g_motionData.retrievePositionNumber = 0;
+    }
     DB_pthread_mutex_unlock(&g_motionMutex);
     return newMotionData;
 }
@@ -4439,14 +4452,14 @@ double getVISCATimestamp(void) {
 
 void *runNetworkThread(void *argIgnored) {
   int time_to_retry = 1;
-  int last_start = time(NULL) - 1;
+  double last_start = getVISCATimestamp() - 1.0;
   while (!exit_app) {
     ssize_t localResponseLength = 0;
 
     DB_pthread_mutex_lock(&g_networkMutex);
     int sock = g_visca_sock;
     if (sock == -1 && g_visca_sockaddr != NULL) {
-      if (time(NULL) - last_start < time_to_retry) {
+      if (getVISCATimestamp() - last_start < time_to_retry) {
         // Unlock immediately.
         DB_pthread_mutex_unlock(&g_networkMutex);
 
@@ -4456,7 +4469,7 @@ void *runNetworkThread(void *argIgnored) {
         // Restart the loop.
         continue;
       }
-      last_start = time(NULL);
+      last_start = getVISCATimestamp();
       sock = directlyConnectToVISCAPortWithAddress(g_visca_sockaddr);
       g_visca_sock = sock;
       if (sock == -1) {
