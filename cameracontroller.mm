@@ -849,6 +849,8 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
 #endif
 #endif  // __linux__
 
+    signal(SIGPIPE, SIG_IGN);
+
     pthread_t motionThread;
     pthread_create(&motionThread, NULL, runPTZThread, NULL);
 
@@ -2161,29 +2163,29 @@ int directlyConnectToVISCAPortWithAddress(const struct sockaddr *address) {
     struct timeval sendTimeout = { 0, 200000 };
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &sendTimeout, sizeof(sendTimeout));
 
-    struct sockaddr_storage sa_recv;
-    bzero(&sa_recv, sizeof(sa_recv));
-    socklen_t sa_recv_len = 0;
-    if (address->sa_family == AF_INET) {
-        struct sockaddr_in *sa_recv4 = (struct sockaddr_in *)&sa_recv;
-        sa_recv4->sin_family = AF_INET;
-        sa_recv4->sin_addr.s_addr = INADDR_ANY;
-        sa_recv4->sin_port = htons(port + 1);
-        sa_recv_len = sizeof(struct sockaddr_in);
-    } else {
-        struct sockaddr_in6 *sa_recv6 = (struct sockaddr_in6 *)&sa_recv;
-        sa_recv6->sin6_family = AF_INET6;
-        sa_recv6->sin6_addr = in6addr_any;
-        sa_recv6->sin6_port = htons(port + 1);
-        sa_recv_len = sizeof(struct sockaddr_in6);
-    }
-    if (bind(sock, (sockaddr *)&sa_recv, sa_recv_len) != 0) {
-        perror("Bind failed");
-        close(sock);
-        return -1;
-    }
-
     if (g_visca_use_udp) {
+        struct sockaddr_storage sa_recv;
+        bzero(&sa_recv, sizeof(sa_recv));
+        socklen_t sa_recv_len = 0;
+        if (address->sa_family == AF_INET) {
+            struct sockaddr_in *sa_recv4 = (struct sockaddr_in *)&sa_recv;
+            sa_recv4->sin_family = AF_INET;
+            sa_recv4->sin_addr.s_addr = INADDR_ANY;
+            sa_recv4->sin_port = htons(port + 1);
+            sa_recv_len = sizeof(struct sockaddr_in);
+        } else {
+            struct sockaddr_in6 *sa_recv6 = (struct sockaddr_in6 *)&sa_recv;
+            sa_recv6->sin6_family = AF_INET6;
+            sa_recv6->sin6_addr = in6addr_any;
+            sa_recv6->sin6_port = htons(port + 1);
+            sa_recv_len = sizeof(struct sockaddr_in6);
+        }
+        if (bind(sock, (sockaddr *)&sa_recv, sa_recv_len) != 0) {
+            perror("Bind failed");
+            close(sock);
+            return -1;
+        }
+
         g_visca_addr = sa;
         g_visca_addr_len = sa_len;
     } else {
@@ -3140,12 +3142,16 @@ int send_visca_packet_raw(int sock, uint8_t *buf, ssize_t bufsize, bool isInquir
         }
         free(udpbuf);
     } else {
-        size_t bytesWritten = write(sock, buf, bufsize);
-        // If we get a partial write, ensure that the connection is closed and reopened.
+        ssize_t bytesWritten = write(sock, buf, bufsize);
+        // If we get a partial write or write error, ensure that the connection is closed and reopened.
         if (bytesWritten != bufsize) {
             perror("write failed.");
             if (bytesWritten > 0) {
                 shutdown(sock, SHUT_RDWR);
+            }
+            if (sock == g_visca_sock) {
+                close(sock);
+                g_visca_sock = -1;
             }
             return -1;
         }
@@ -4574,7 +4580,7 @@ void *runNetworkThread(void *argIgnored) {
               uint8_t *data = (uint8_t *)malloc(received_length);
               bcopy(buf, data, received_length);
               push_response(data, received_length);
-            } else if (received_length == 0) {
+            } else if (received_length == 0 || (received_length < 0 && errno != EAGAIN && errno != EINTR)) {
               // Disconnected TCP socket.
               DB_pthread_mutex_lock(&g_networkMutex);
               if (sock == g_visca_sock && !g_visca_use_udp) {
