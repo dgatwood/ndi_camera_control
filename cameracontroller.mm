@@ -948,6 +948,10 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
                                 close(g_visca_sock);
                                 g_visca_sock = -1;
                             }
+                            if (g_visca_sockaddr != NULL) {
+                                free(g_visca_sockaddr);
+                                g_visca_sockaddr = NULL;
+                            }
                             DB_pthread_mutex_unlock(&g_networkMutex);
                             if (enable_visca) {
                                 visca_running = connectVISCA(stream_name, "1");
@@ -2091,6 +2095,13 @@ bool connectToVISCAPortWithAddress(const struct sockaddr *address) {
     }
 
     DB_pthread_mutex_lock(&g_networkMutex);
+    // Prefer IPv4: if we already have an IPv4 address for the camera, do not overwrite
+    // it with an IPv6 address from a later resolver callback.
+    if (address->sa_family == AF_INET6 && g_visca_sockaddr != NULL &&
+        g_visca_sockaddr->sa_family == AF_INET) {
+        DB_pthread_mutex_unlock(&g_networkMutex);
+        return true;
+    }
     if (g_visca_sock != -1 && g_visca_sockaddr != NULL &&
         g_visca_sockaddr->sa_family == address->sa_family &&
         memcmp(g_visca_sockaddr, address, addr_size) == 0) {
@@ -3092,11 +3103,10 @@ int send_visca_packet(int sock, uint8_t *buf, ssize_t bufsize, int timeout_usec,
     DB_pthread_mutex_lock(&g_networkMutex);
     static uint32_t visca_sequence_number = 0;
     uint32_t sequenceNumber = visca_sequence_number++;
-    DB_pthread_mutex_unlock(&g_networkMutex);
-
     if (outSequenceNumber != NULL) {
       *outSequenceNumber = sequenceNumber;
     }
+    DB_pthread_mutex_unlock(&g_networkMutex);
 
     push_request(copiedBuffer, bufsize, isInquiry, sequenceNumber);
 
