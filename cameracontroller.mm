@@ -279,6 +279,13 @@ typedef struct receiver_array_item {
     receiver_thread_data_t thread_data;
 } *receiver_array_item_t;
 
+/** The 8-byte VISCA-over-IP packet header preceding the payload. */
+typedef struct {
+    uint8_t cmd[2];
+    uint16_t len;               // Big endian (network byte order)
+    uint32_t sequence_number;   // Big endian (network byte order)
+} visca_header_t;
+
 typedef struct visca_network_packet {
     size_t length;
     uint8_t *data;
@@ -480,7 +487,6 @@ int g_visca_sock = -1;
 int g_visca_port = 0;
 struct sockaddr_storage g_visca_addr;
 socklen_t g_visca_addr_len = 0;
-bool g_visca_use_udp = false;
 
 #if __linux__
     pthread_mutex_t g_networkMutex = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER_NP;
@@ -590,7 +596,6 @@ int main(int argc, char *argv[]) {
     enable_visca = true;
     enable_visca_ptz = true;
     // enable_ptz_debugging = true;
-    g_visca_use_udp = true;
 
     g_visca_port = 52381;
 
@@ -712,10 +717,14 @@ int main(int argc, char *argv[]) {
             enable_visca = true;
             enable_visca_ptz = true;
         }
-        if (!strcmp(argv[i], "-u") || !strcmp(argv[i], "--visca_use_udp")) {
-            fprintf(stderr, "Enabling VISCA UDP.\n");
+        if (!strcmp(argv[i], "-t") || !strcmp(argv[i], "--use_visca_for_tally")) {
+            fprintf(stderr, "Enabling VISCA for tally info.\n");
             enable_visca = true;
-            g_visca_use_udp = true;
+        }
+        if (!strcmp(argv[i], "-u") || !strcmp(argv[i], "--visca_use_udp")) {
+            fprintf(stderr, "The -u and --visca_use_udp flags are deprecated.\n"
+                            "Please use -t or --use_visca_for_tally instead.");
+            enable_visca = true;
         }
 #ifdef USE_VISCA_FOR_EXPOSURE_COMPENSATION
         // NDI only has exposure setting, VISCA only has compensation, iris, gain,
@@ -848,8 +857,6 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
     }
 #endif
 #endif  // __linux__
-
-    signal(SIGPIPE, SIG_IGN);
 
     pthread_t motionThread;
     pthread_create(&motionThread, NULL, runPTZThread, NULL);
@@ -2134,8 +2141,8 @@ bool connectToVISCAPortWithAddress(const struct sockaddr *address) {
 }
 
 int directlyConnectToVISCAPortWithAddress(const struct sockaddr *address) {
-    // Marshall uses 52381 UDP; PTZOptics uses 5678 TCP or 1259 UDP.
-    int port = g_visca_port ?: (g_visca_use_udp ? 1259 : 5678);
+    // Marshall uses 52381 UDP; PTZOptics uses 1259 UDP.
+    int port = g_visca_port ?: 1259;
 
     if (g_visca_port != 0) {
         fprintf(stderr, "Connecting to custom VISCA port %d\n", port);
@@ -2165,9 +2172,7 @@ int directlyConnectToVISCAPortWithAddress(const struct sockaddr *address) {
 
     fprintf(stderr, "Connecting to VISCA port %d on %s\n", port, addr_str);
 
-    int sock = g_visca_use_udp ?
-        socket(address->sa_family, SOCK_DGRAM, IPPROTO_UDP) :
-        socket(address->sa_family, SOCK_STREAM, IPPROTO_TCP);
+    int sock = socket(address->sa_family, SOCK_DGRAM, IPPROTO_UDP);
     if (sock == -1) {
         perror("Socket could not be created.");
         return -1;
@@ -2178,41 +2183,30 @@ int directlyConnectToVISCAPortWithAddress(const struct sockaddr *address) {
     struct timeval sendTimeout = { 0, 200000 };
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &sendTimeout, sizeof(sendTimeout));
 
-    if (g_visca_use_udp) {
-        struct sockaddr_storage sa_recv;
-        bzero(&sa_recv, sizeof(sa_recv));
-        socklen_t sa_recv_len = 0;
-        if (address->sa_family == AF_INET) {
-            struct sockaddr_in *sa_recv4 = (struct sockaddr_in *)&sa_recv;
-            sa_recv4->sin_family = AF_INET;
-            sa_recv4->sin_addr.s_addr = INADDR_ANY;
-            sa_recv4->sin_port = htons(port + 1);
-            sa_recv_len = sizeof(struct sockaddr_in);
-        } else {
-            struct sockaddr_in6 *sa_recv6 = (struct sockaddr_in6 *)&sa_recv;
-            sa_recv6->sin6_family = AF_INET6;
-            sa_recv6->sin6_addr = in6addr_any;
-            sa_recv6->sin6_port = htons(port + 1);
-            sa_recv_len = sizeof(struct sockaddr_in6);
-        }
-        if (bind(sock, (sockaddr *)&sa_recv, sa_recv_len) != 0) {
-            perror("Bind failed");
-            close(sock);
-            return -1;
-        }
-
-        g_visca_addr = sa;
-        g_visca_addr_len = sa_len;
+    struct sockaddr_storage sa_recv;
+    bzero(&sa_recv, sizeof(sa_recv));
+    socklen_t sa_recv_len = 0;
+    if (address->sa_family == AF_INET) {
+        struct sockaddr_in *sa_recv4 = (struct sockaddr_in *)&sa_recv;
+        sa_recv4->sin_family = AF_INET;
+        sa_recv4->sin_addr.s_addr = INADDR_ANY;
+        sa_recv4->sin_port = htons(port + 1);
+        sa_recv_len = sizeof(struct sockaddr_in);
     } else {
-        DB_pthread_mutex_unlock(&g_networkMutex);
-        if (connect(sock, (struct sockaddr *) &sa, sa_len) == -1) {
-            perror("Connect failed");
-            close(sock);
-            DB_pthread_mutex_lock(&g_networkMutex);
-            return -1;
-        }
-        DB_pthread_mutex_lock(&g_networkMutex);
+        struct sockaddr_in6 *sa_recv6 = (struct sockaddr_in6 *)&sa_recv;
+        sa_recv6->sin6_family = AF_INET6;
+        sa_recv6->sin6_addr = in6addr_any;
+        sa_recv6->sin6_port = htons(port + 1);
+        sa_recv_len = sizeof(struct sockaddr_in6);
     }
+    if (bind(sock, (sockaddr *)&sa_recv, sa_recv_len) != 0) {
+        perror("Bind failed");
+        close(sock);
+        return -1;
+    }
+
+    g_visca_addr = sa;
+    g_visca_addr_len = sa_len;
     return sock;
 }
 
@@ -2930,7 +2924,7 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
     __block uint32_t sequenceNumber = 0;  // Populated below.
 
     packetResponseHandler handler = ^(visca_network_packet_t packet) {
-        const size_t udp_offset = g_visca_use_udp ? 8 : 0;
+        const size_t udp_offset = sizeof(visca_header_t);
 
         if (packet->length < udp_offset) return false;
 
@@ -2939,24 +2933,21 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
         }
 
         uint8_t *blockResponse = packet->data;
+        visca_header_t *header = (visca_header_t *)blockResponse;
 
         // Verify that the response is for the correct message, and that the length
         // of the payload matches the packet length.
-        if (g_visca_use_udp) {
-            if (blockResponse[0] != 0x01 ||
-                blockResponse[1] != 0x11 ||
-                /* Bytes 2-3 are length. */
-                ((packet->length - udp_offset) != ((uint32_t)blockResponse[2] << 8 | blockResponse[3])) ||
-                /* Bytes 4 - 7 are sequence number, parsed already. */
-                packet->sequenceNumber != sequenceNumber) {
-                if (localDebug) {
-                    fprintf(stderr, "%lf Unexpected response packet[1] %s\n", getVISCATimestamp(), fmtbuf(blockResponse, packet->length));
-                    uint16_t payloadLength = (packet->length - udp_offset);
-                    fprintf(stderr, "Expected %02x %02x %02x %02x %02x %02x %02x %02x\n", 1, 0x11, payloadLength >> 8, payloadLength & 0xff, sequenceNumber >> 24,
-                            (sequenceNumber >> 16) & 0xff, (sequenceNumber >> 8) & 0xff, sequenceNumber & 0xff);
-                }
-                return false;
+        if (header->cmd[0] != 0x01 ||
+            header->cmd[1] != 0x11 ||
+            ((packet->length - udp_offset) != ntohs(header->len)) ||
+            packet->sequenceNumber != sequenceNumber) {
+            if (localDebug) {
+                fprintf(stderr, "%lf Unexpected response packet[1] %s\n", getVISCATimestamp(), fmtbuf(blockResponse, packet->length));
+                uint16_t payloadLength = (packet->length - udp_offset);
+                visca_header_t expectedHeader = { { 0x01, 0x11 }, htons(payloadLength), htonl(sequenceNumber) };
+                fprintf(stderr, "Expected %s\n", fmtbuf((uint8_t *)&expectedHeader, sizeof(expectedHeader)));
             }
+            return false;
         }
 
         // Verify that the packet length makes sense or that it is an error packet.
@@ -3131,51 +3122,30 @@ int send_visca_packet(int sock, uint8_t *buf, ssize_t bufsize, int timeout_usec,
 
 int send_visca_packet_raw(int sock, uint8_t *buf, ssize_t bufsize, bool isInquiry,
                           uint32_t sequenceNumber) {
-    if (g_visca_use_udp) {
-        ssize_t udpbufsize = bufsize + 8;
-        uint8_t *udpbuf = (uint8_t *)malloc(udpbufsize);
-        udpbuf[0] = 0x01;
-        udpbuf[1] = isInquiry ? 0x10 : 0x00;
-        udpbuf[2] = 0x00;
-        udpbuf[3] = bufsize;
-//
-        udpbuf[4] = sequenceNumber >> 24;
-        udpbuf[5] = (sequenceNumber >> 16) & 0xff;
-        udpbuf[6] = (sequenceNumber >> 8) & 0xff;
-        udpbuf[7] = sequenceNumber & 0xff;
-        bcopy(buf, udpbuf + 8, bufsize);
-        if (sendto(sock, udpbuf, udpbufsize, 0,
-               (sockaddr *)&g_visca_addr, g_visca_addr_len) != udpbufsize) {
-            perror("write failed.");
-            free(udpbuf);
-            return -1;
-        }
-
-        if (enable_verbose_debugging) {
-            fprintf(stderr, "Sent %s\n", fmtbuf(udpbuf, bufsize + 8));
-        }
+    ssize_t udpbufsize = bufsize + sizeof(visca_header_t);
+    uint8_t *udpbuf = (uint8_t *)malloc(udpbufsize);
+    visca_header_t *header = (visca_header_t *)udpbuf;
+    header->cmd[0] = 0x01;
+    header->cmd[1] = isInquiry ? 0x10 : 0x00;
+    header->len = htons(bufsize);
+    header->sequence_number = htonl(sequenceNumber);
+    bcopy(buf, udpbuf + sizeof(visca_header_t), bufsize);
+    if (sendto(sock, udpbuf, udpbufsize, 0,
+           (sockaddr *)&g_visca_addr, g_visca_addr_len) != udpbufsize) {
+        perror("write failed.");
         free(udpbuf);
-    } else {
-        ssize_t bytesWritten = write(sock, buf, bufsize);
-        // If we get a partial write or write error, ensure that the connection is closed and reopened.
-        if (bytesWritten != bufsize) {
-            perror("write failed.");
-            if (bytesWritten > 0) {
-                shutdown(sock, SHUT_RDWR);
-            }
-            if (sock == g_visca_sock) {
-                close(sock);
-                g_visca_sock = -1;
-            }
-            return -1;
-        }
+        return -1;
     }
+
+    if (enable_verbose_debugging) {
+        fprintf(stderr, "Sent %s\n", fmtbuf(udpbuf, udpbufsize));
+    }
+    free(udpbuf);
     return 0;
 }
 
 bool get_ack(int sock, uint32_t sequence_number, int timeout_usec) {
     bool localDebug = enable_verbose_debugging || false;
-    int udp_offset = g_visca_use_udp ? 8 : 0;
     if (enable_verbose_debugging) {
         fprintf(stderr, "in get_ack\n");
     }
@@ -3192,7 +3162,7 @@ bool get_ack(int sock, uint32_t sequence_number, int timeout_usec) {
         int ack_type = -1;
 
         while (packet && !(found_4 && found_5)) {
-            bool matches = (packet->sequenceNumber == sequence_number) || !g_visca_use_udp;
+            bool matches = (packet->sequenceNumber == sequence_number);
             ack_type = ackType(packet);
             if (matches && ack_type == 5 && !found_5) {
                 found_5 = true;
@@ -4225,7 +4195,7 @@ float scaleAxisValue(int axis, int rawValue) {
 #ifdef ENABLE_PAN_TILT_SPEED_COMPENSATION
   // If VISCA is enabled, even if we're using NDI for PTZ control, we can still poll the zoom
   // position and be smart about the pan and tilt speed.
-  if (enable_visca && axis != kPTZAxisZoom) {
+  if (enable_visca && enable_visca_ptz && axis != kPTZAxisZoom) {
     // Range is 0 to 1, where 1 is zoomed all the way in, with 20x being about 0x4000, 30x about
     // 0x6000, etc., or at least that seems to be the typical range.  After scaling, this is
     // 0.25 for 20x and 0.375 for 30x.  (Based on my Marshall cameras.)
@@ -4298,11 +4268,11 @@ void printQueue(visca_network_queue_t queue) {
 }
 
 uint32_t parseSequenceNumber(uint8_t *data, size_t length) {
-  if (g_visca_use_udp) {
-    return (length < 8) ? 0 : (uint32_t)data[4] << 24 | data[5] << 16 | data[6] << 8 | data[7];
-  } else {
-    return 42;  // Unused anyway.
+  if (length < sizeof(visca_header_t)) {
+    return 0;
   }
+  visca_header_t *header = (visca_header_t *)data;
+  return ntohl(header->sequence_number);
 }
 
 void push_response(uint8_t *response, size_t length) {
@@ -4494,7 +4464,7 @@ void process_incoming_packets(void) {
 
 int ackType(visca_network_packet_t packet) {
     bool localDebug = enable_verbose_debugging || false;
-    int udp_offset = g_visca_use_udp ? 8 : 0;
+    const int udp_offset = sizeof(visca_header_t);
     if (enable_verbose_debugging) {
         fprintf(stderr, "in ackType\n");
     }
@@ -4552,7 +4522,6 @@ void *runNetworkThread(void *argIgnored) {
     }
     DB_pthread_mutex_unlock(&g_networkMutex);
 
-    int udp_offset = g_visca_use_udp ? 8 : 0;
     bool localDebug = false;
 
     static uint8_t buf[65535];
@@ -4605,14 +4574,6 @@ void *runNetworkThread(void *argIgnored) {
               uint8_t *data = (uint8_t *)malloc(received_length);
               bcopy(buf, data, received_length);
               push_response(data, received_length);
-            } else if (received_length == 0 || (received_length < 0 && errno != EAGAIN && errno != EINTR)) {
-              // Disconnected TCP socket.
-              DB_pthread_mutex_lock(&g_networkMutex);
-              if (sock == g_visca_sock && !g_visca_use_udp) {
-                close(sock);
-                g_visca_sock = -1;
-              }
-              DB_pthread_mutex_unlock(&g_networkMutex);
             }
             continue;
         }
