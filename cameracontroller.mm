@@ -3339,9 +3339,16 @@ int recallSpeedVISCA(void) {
 float readAxisPosition(int axis, float previousValue) {
     #ifndef ENABLE_FILES_FOR_BUTTON_TESTING
         if (!io_expander) return 0;
+        static int failureCount[kPTZAxisZoom + 1] = {0};
         int pin = pinNumberForAxis(axis);
         int adcValue = input(io_expander, pin, 0.001);
-        if (adcValue < 0) return previousValue;
+        if (adcValue < 0) {
+            if (++failureCount[axis] > 5) {
+                return 0.0;
+            }
+            return previousValue;
+        }
+        failureCount[axis] = 0;
         int rawValue = adcValue - 2048;
         return scaleAxisValue(axis, rawValue);
     #else  // ENABLE_FILES_FOR_BUTTON_TESTING
