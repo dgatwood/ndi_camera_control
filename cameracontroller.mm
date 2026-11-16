@@ -2542,7 +2542,7 @@ void updateTallyLightsOverVISCA(int sock) {
     // 81 09 7E 01 0A FF (red check) -> 90 50 0p FF where p is 2 (on) or 3 (off)
     // 81 09 7E 04 1A FF (green check) -> 90 50 0p FF where p is 2 (on) or 3 (off)
 
-    static int tallyFailCount = 0;
+    static double lastTallySuccessTime = 0;
     if (sock == -1) {
         g_camera_active = false;
         g_camera_preview = false;
@@ -2552,7 +2552,7 @@ void updateTallyLightsOverVISCA(int sock) {
     ssize_t responseLength = 0;
     uint8_t *responseBuf = send_visca_inquiry(sock, buf, sizeof(buf), 20000, &responseLength);
     if (responseBuf && responseLength == 4 && responseBuf[1] == 0x50 && responseBuf[3] == 0xff) {
-        tallyFailCount = 0;
+        lastTallySuccessTime = getVISCATimestamp();
         if (enable_verbose_debugging) {
             fprintf(stderr, "Got tally data: %s\n", fmtbuf(responseBuf, responseLength));
         }
@@ -2569,7 +2569,7 @@ void updateTallyLightsOverVISCA(int sock) {
         } else {
             fprintf(stderr, "Unknown tally mode %d\n", tallyMode);
         }
-    } else if (++tallyFailCount >= 10) {
+    } else if ((getVISCATimestamp() - lastTallySuccessTime) >= 10.0) {
         // Give up after 10 seconds without a response from the camera.
         g_camera_active = false;
         g_camera_preview = false;
