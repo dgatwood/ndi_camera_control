@@ -3796,17 +3796,21 @@ void setMotionData(motionData_t newMotionData) {
      * running on the main thread can send it to the camera.
      *
      * Preserve any rising-edge button press until the NDI thread consumes it,
-     * so a button press shorter than one video frame is not lost.
+     * so a button press shorter than one video frame is not lost.  Only latch
+     * when NDI preset control is active and the stream is healthy, so button
+     * presses while disconnected do not fire when a stream later connects.
      */
     DB_pthread_mutex_lock(&g_motionMutex);
     int prevStore = g_motionData.storePositionNumber;
     int prevRetrieve = g_motionData.retrievePositionNumber;
     g_motionData = newMotionData;
-    if (newMotionData.storePositionNumber == 0 && prevStore > 0) {
-        g_motionData.storePositionNumber = prevStore;
-    }
-    if (newMotionData.retrievePositionNumber == 0 && prevRetrieve > 0) {
-        g_motionData.retrievePositionNumber = prevRetrieve;
+    if (g_ptzEnabled && !use_visca_for_presets && !g_camera_malfunctioning) {
+        if (newMotionData.storePositionNumber == 0 && prevStore > 0) {
+            g_motionData.storePositionNumber = prevStore;
+        }
+        if (newMotionData.retrievePositionNumber == 0 && prevRetrieve > 0) {
+            g_motionData.retrievePositionNumber = prevRetrieve;
+        }
     }
     DB_pthread_mutex_unlock(&g_motionMutex);
 }
