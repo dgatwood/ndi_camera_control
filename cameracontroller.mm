@@ -1295,7 +1295,7 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
     }
 
     g_framebufferBase = g_framebufferMemory + framebufferMemoryOffset;
-    g_framebufferActiveMemory = g_framebufferMemory + framebufferMemoryOffset + (g_initialFramebufferConfiguration.yres * g_initialFramebufferConfiguration.xres * (g_initialFramebufferConfiguration.bits_per_pixel / 8));
+    g_framebufferActiveMemory = g_framebufferMemory + framebufferMemoryOffset + (g_initialFramebufferConfiguration.yres * g_framebufferFixedConfiguration.line_length);
     return true;
 
   fail:
@@ -1377,9 +1377,8 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
             return false;
         }
 
-        ssize_t screenSize = g_framebufferActiveConfiguration.xres *
-                             g_framebufferActiveConfiguration.yres *
-                             monitor_bytes_per_pixel;
+        ssize_t lineLength = g_framebufferFixedConfiguration.line_length;
+        ssize_t screenSize = lineLength * g_framebufferActiveConfiguration.yres;
         static unsigned char *tempBuf = NULL;
         if (tempBuf == NULL) {
             tempBuf = (unsigned char *)mmap(0, screenSize, PROT_READ | PROT_WRITE,
@@ -1397,40 +1396,41 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
                 fprintf(stderr, "fastpath\n");
             }
 
-            bcopy(video_recv->p_data, tempBuf, screenSize);
+            if (lineLength == video_recv->line_stride_in_bytes) {
+                bcopy(video_recv->p_data, tempBuf, screenSize);
+            } else {
+                ssize_t rowBytes = g_framebufferXRes * monitor_bytes_per_pixel;
+                for (int y = 0; y < g_framebufferYRes; y++) {
+                    bcopy(video_recv->p_data + (y * video_recv->line_stride_in_bytes),
+                          tempBuf + (y * lineLength), rowBytes);
+                }
+            }
             drawOnScreenLights(tempBuf, g_framebufferXRes, g_framebufferYRes, monitor_bytes_per_pixel);
         } else {
             if (enable_verbose_debugging) {
                 fprintf(stderr, "slowpath (%f / %f)\n", g_xScaleFactor, g_yScaleFactor);
             }
             uint32_t *inBuf = (uint32_t *)video_recv->p_data;
-            uint16_t *outBuf16 = (uint16_t *)tempBuf;
-            uint32_t *outBuf32 = (uint32_t *)tempBuf;
             for (int y = 0; y < video_recv->yres; y++) {
                 int minRow = scaledRow(y);
                 int maxRow = scaledRow(y+1) - 1;
+                uint16_t *outRow16 = (uint16_t *)(tempBuf + (minRow * lineLength));
+                uint32_t *outRow32 = (uint32_t *)(tempBuf + (minRow * lineLength));
                 for (int x = 0; x < video_recv->xres; x++) {
                     int flippedX = monitor_flipped ? video_recv->xres - x - 1 : x;
                     int flippedY = monitor_flipped ? video_recv->yres - y - 1 : y;
                     uint32_t *inPos = &inBuf[(flippedY * video_recv->xres) + flippedX];
                     for (int outX = scaledColumn(x); outX < scaledColumn(x+1); outX++) {
                         if (monitor_bytes_per_pixel == 4) {
-                            uint32_t *outPos32 = &outBuf32[(minRow * g_framebufferXRes) + outX];
-                            *outPos32 = *inPos;
+                            outRow32[outX] = *inPos;
                         } else {
-                            uint16_t *outPos16 = &outBuf16[(minRow * g_framebufferXRes) + outX];
-                            *outPos16 = convert_sample_to_16bpp(*inPos);
+                            outRow16[outX] = convert_sample_to_16bpp(*inPos);
                         }
                     }
                 }
                 for (int row = minRow + 1; row <= maxRow; row++) {
-                    if (monitor_bytes_per_pixel == 4) {
-                        bcopy(&outBuf32[(minRow * g_framebufferXRes)],
-                              &outBuf32[(row * g_framebufferXRes)], g_framebufferXRes * monitor_bytes_per_pixel);
-                    } else {
-                        bcopy(&outBuf16[(minRow * g_framebufferXRes)],
-                              &outBuf16[(row * g_framebufferXRes)], g_framebufferXRes * monitor_bytes_per_pixel);
-                    }
+                    bcopy(tempBuf + (minRow * lineLength),
+                          tempBuf + (row * lineLength), g_framebufferXRes * monitor_bytes_per_pixel);
                 }
             }
             drawOnScreenLights(tempBuf, g_framebufferXRes, g_framebufferYRes, monitor_bytes_per_pixel);
@@ -1612,7 +1612,11 @@ void drawOnScreenLights(unsigned char *framebuffer_base, int xres, int yres, int
 void drawLightPixel(unsigned char *framebuffer_base, ssize_t offset, int color, int bytes_per_pixel);
 void drawOnScreenLight(unsigned char *framebuffer_base, int xres, int bytes_per_pixel,
                        int min_x, int max_x, int min_y, int max_y, enum onScreenColor color) {
+#if __linux__
+    ssize_t bytes_per_row = g_framebufferFixedConfiguration.line_length;
+#else
     ssize_t bytes_per_row = (xres * bytes_per_pixel);
+#endif
     ssize_t first_row_offset = (bytes_per_row * min_y);
     ssize_t last_row_offset = (bytes_per_row * (max_y + 1));
 
