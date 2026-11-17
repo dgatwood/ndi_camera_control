@@ -3572,7 +3572,6 @@ void updateLights(motionData_t *motionData) {
             holdAfterBlink = true;
         } else if (motionData->storePositionNumber > 0) {
             if (localDebug) fprintf(stderr, "LIGHTS: Store %d\n", motionData->storePositionNumber);
-            litButtons &= ~mainButtonMask;
             blinkingButtons |= 1 << motionData->storePositionNumber;
             blinkCounter = PULSES_PER_BLINK * 5;
             holdAfterBlink = true;
