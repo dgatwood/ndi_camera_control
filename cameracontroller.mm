@@ -511,6 +511,7 @@ motionData_t g_motionData;
 #endif
 
 static std::atomic<bool> exit_app(false);
+static std::atomic<bool> exit_network_thread(false);
 static void sigint_handler(int)
 {    exit_app = true;
 }
@@ -1028,6 +1029,7 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
             sendZoomUpdatesOverVISCA(g_visca_sock, &stopMotionData);
             sendPanTiltUpdatesOverVISCA(g_visca_sock, &stopMotionData);
         }
+        exit_network_thread = true;
         pthread_join(networkThread, NULL);
 
         // Destroy the NDI finder. We needed to have access to the pointers to p_sources[0]
@@ -2957,38 +2959,27 @@ uint8_t *send_visca_inquiry(int sock, uint8_t *buf, ssize_t bufsize, int timeout
             return false;
         }
 
-        // Verify that the packet length makes sense or that it is an error packet.
+        // Check for a 4-byte VISCA error reply (0x9y 0x6z <err> 0xFF) before the length
+        // and response-type checks, since 4-byte inquiries (such as tally) have the same
+        // expected payload length as an error reply.
         bool isError = false;
-        if (!is_valid_response_length(buf, bufsize, packet->length - udp_offset)) {
+        if (packet->length - udp_offset == 4 &&
+            (blockResponse[udp_offset] & 0xf0) == 0x90 &&
+            (blockResponse[udp_offset + 1] & 0xf0) == 0x60 &&
+            blockResponse[udp_offset + 3] == 0xFF) {
+            if (localDebug) {
+                fprintf(stderr, "Is an error packet (%s).  Reporting the error.\n",
+                    fmtbuf(packet->data, packet->length));
+            }
+            isError = true;
+        } else if (!is_valid_response_length(buf, bufsize, packet->length - udp_offset)) {
             if (localDebug) {
               fprintf(stderr, "In packetResponseHandler unexpected payload length %lld\n",
                   (long long)(packet->length - udp_offset));
               fprintf(stderr, "Command:  %s\n", fmtbuf(buf, bufsize));
               fprintf(stderr, "Response: %s\n", fmtbuf(packet->data, packet->length));
             }
-
-            if (packet->length - udp_offset == 4) {
-              if (packet->data[udp_offset] == 0x90 &&
-                  packet->data[udp_offset + 1] == 0x60 &&
-                  packet->data[udp_offset + 2] == 0x02 &&
-                  packet->data[udp_offset + 3] == 0xFF) {
-                if (localDebug) {
-                  fprintf(stderr, "Is a syntax error packet.  Reporting the error.\n");
-                }
-                isError = true;
-              } else {
-                // Some other error packet.  Ignoring.
-                if (localDebug) {
-                  fprintf(stderr, "Error packet.  Ignoring.\n");
-                }
-                return false;
-              }
-            } else {
-              if (localDebug) {
-                fprintf(stderr, "Not a valid error packet.  Ignoring.\n");
-              }
-              return false;
-            }
+            return false;
         } else if (blockResponse[1 + udp_offset] != 0x50) {
             if (localDebug) {
                 fprintf(stderr, "Ignoring unexpected response packet[2] %s\n", fmtbuf(blockResponse, packet->length));
@@ -3162,16 +3153,22 @@ bool get_ack(int sock, uint32_t sequence_number, int timeout_usec) {
 
     // IMPORTANT: Take and release the lock inside this loop to avoid blocking
     // the network thread.
-    bool found_5 = false, found_4 = false;
-    while (getVISCATimestamp() < startTime + ((double)timeout_usec / 1000000.0) && !found_5) {
+    bool found_5 = false, found_4 = false, found_error = false;
+    while (getVISCATimestamp() < startTime + ((double)timeout_usec / 1000000.0) && !found_5 && !found_error) {
         DB_pthread_mutex_lock(&g_networkMutex);
         visca_network_packet_t packet = g_visca_indata->head;
         int ack_type = -1;
 
-        while (packet && !(found_4 && found_5)) {
+        while (packet && !((found_4 && found_5) || found_error)) {
             bool matches = (packet->sequenceNumber == sequence_number);
             ack_type = ackType(packet);
-            if (matches && ack_type == 5 && !found_5) {
+            if (matches && ack_type == 6) {
+                found_error = true;
+                if (enable_verbose_debugging) {
+                    fprintf(stderr, "DEQUEUE ACK ERROR %s\n", fmtbuf(packet->data, packet->length));
+                }
+                packet = deletePacketFromQueue(packet, g_visca_indata);
+            } else if (matches && ack_type == 5 && !found_5) {
                 found_5 = true;
                 if (enable_verbose_debugging) {
                     fprintf(stderr, "DEQUEUE ACK 5 %s\n", fmtbuf(packet->data, packet->length));
@@ -3189,10 +3186,11 @@ bool get_ack(int sock, uint32_t sequence_number, int timeout_usec) {
         }
 
         DB_pthread_mutex_unlock(&g_networkMutex);
+        if (found_5 || found_error) break;
         usleep(200);  // Because glibc mutexes are not fair, sleep a bit so we don't starve other threads.
     }
 
-    return found_5;
+    return found_5 && !found_error;
 }
 
 #pragma mark - PTZ Core
@@ -4477,8 +4475,14 @@ int ackType(visca_network_packet_t packet) {
     if (enable_verbose_debugging) {
         fprintf(stderr, "in ackType\n");
     }
-    if (packet->length != 3 + udp_offset) return -1;
     if (!packet->data) return -1;
+    if (packet->length == 4 + udp_offset &&
+        (packet->data[0 + udp_offset] & 0xf0) == 0x90 &&
+        (packet->data[1 + udp_offset] & 0xf0) == 0x60 &&
+        packet->data[3 + udp_offset] == 0xff) {
+        return 6;
+    }
+    if (packet->length != 3 + udp_offset) return -1;
     if (packet->data[0 + udp_offset] != 0x90 && localDebug) {
         fprintf(stderr, "Unexpected ack address 0x%02x\n", packet->data[0 + udp_offset]);
     }
@@ -4502,7 +4506,7 @@ double getVISCATimestamp(void) {
 void *runNetworkThread(void *argIgnored) {
   int time_to_retry = 1;
   double last_start = getVISCATimestamp() - 1.0;
-  while (!exit_app) {
+  while (!exit_network_thread) {
     ssize_t localResponseLength = 0;
 
     DB_pthread_mutex_lock(&g_networkMutex);
