@@ -1,4 +1,7 @@
 
+#ifndef __LIGHT_CONFIGURATION_H__
+#define __LIGHT_CONFIGURATION_H__
+
 // w and h are screen width and height.
 // Adjust these macros to suit.
 
@@ -39,3 +42,5 @@
 #define LIGHT_5_X_MAX(w) (w * .97)
 #define LIGHT_5_Y_MIN(h) (h * .95)
 #define LIGHT_5_Y_MAX(h) (h * .98)
+
+#endif  // __LIGHT_CONFIGURATION_H__

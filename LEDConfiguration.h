@@ -1,3 +1,6 @@
+#ifndef __LED_CONFIGURATION_H__
+#define __LED_CONFIGURATION_H__
+
 // LED duty cycle configuration.  Adjust as
 // needed for your resistor configuration
 // to compensate for differences in
@@ -39,4 +42,6 @@
     #define LED_PIN_RGB_GREEN 20
     #define LED_PIN_RGB_BLUE 21
 #endif
+
+#endif  // __LED_CONFIGURATION_H__
 
