@@ -1387,6 +1387,12 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
         ssize_t lineLength = g_framebufferFixedConfiguration.line_length;
         ssize_t screenSize = lineLength * g_framebufferActiveConfiguration.yres;
         static unsigned char *tempBuf = NULL;
+        static ssize_t tempBufSize = 0;
+        if (tempBuf != NULL && tempBufSize != screenSize) {
+            munmap(tempBuf, tempBufSize);
+            tempBuf = NULL;
+            tempBufSize = 0;
+        }
         if (tempBuf == NULL) {
             tempBuf = (unsigned char *)mmap(0, screenSize, PROT_READ | PROT_WRITE,
                                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -1395,6 +1401,7 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
                 tempBuf = NULL;
                 return false;
             }
+            tempBufSize = screenSize;
         }
         if (g_xScaleFactor == 1.0 && g_yScaleFactor == 1.0 && monitor_bytes_per_pixel == 4 &&
             !monitor_flipped && !force_slow_path) {
@@ -3562,10 +3569,13 @@ void updateLights(motionData_t *motionData) {
             blinkCounter = 0;
             litButtons &= ~mainButtonMask;
             litButtons |= (1 << motionData->retrievePositionNumber);
+            holdAfterBlink = true;
         } else if (motionData->storePositionNumber > 0) {
             if (localDebug) fprintf(stderr, "LIGHTS: Store %d\n", motionData->storePositionNumber);
+            litButtons &= ~mainButtonMask;
             blinkingButtons |= 1 << motionData->storePositionNumber;
             blinkCounter = PULSES_PER_BLINK * 5;
+            holdAfterBlink = true;
         }
     }
 
