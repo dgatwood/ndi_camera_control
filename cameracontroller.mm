@@ -1432,7 +1432,11 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
             if (enable_verbose_debugging) {
                 fprintf(stderr, "slowpath (%f / %f)\n", g_xScaleFactor, g_yScaleFactor);
             }
-            uint32_t *inBuf = (uint32_t *)video_recv->p_data;
+            // Rows in the NDI frame are line_stride_in_bytes apart, which is not necessarily
+            // xres * 4 (the same reason the fast path above checks the stride).
+            const uint8_t *inBytes = (const uint8_t *)video_recv->p_data;
+            ssize_t inStride = (video_recv->line_stride_in_bytes != 0) ?
+                video_recv->line_stride_in_bytes : ((ssize_t)video_recv->xres * 4);
             for (int y = 0; y < video_recv->yres; y++) {
                 int minRow = scaledRow(y);
                 int maxRow = scaledRow(y+1) - 1;
@@ -1441,7 +1445,8 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
                 for (int x = 0; x < video_recv->xres; x++) {
                     int flippedX = monitor_flipped ? video_recv->xres - x - 1 : x;
                     int flippedY = monitor_flipped ? video_recv->yres - y - 1 : y;
-                    uint32_t *inPos = &inBuf[(flippedY * video_recv->xres) + flippedX];
+                    const uint32_t *inPos =
+                        (const uint32_t *)(inBytes + ((ssize_t)flippedY * inStride)) + flippedX;
                     for (int outX = scaledColumn(x); outX < scaledColumn(x+1); outX++) {
                         if (monitor_bytes_per_pixel == 4) {
                             outRow32[outX] = *inPos;
@@ -1519,9 +1524,21 @@ bool configureScreen(NDIlib_video_frame_v2_t *video_recv) {
             return false;
         }
         dispatch_sync(dispatch_get_main_queue(), ^{
-            ssize_t bufsize = video_recv->xres * video_recv->yres * 4;
+            ssize_t rowBytes = (ssize_t)video_recv->xres * 4;
+            ssize_t inStride = (video_recv->line_stride_in_bytes != 0) ?
+                video_recv->line_stride_in_bytes : rowBytes;
+            ssize_t bufsize = rowBytes * video_recv->yres;
             unsigned char *datacopy = (unsigned char *)malloc(bufsize);
-            bcopy(video_recv->p_data, datacopy, bufsize);
+            if (inStride == rowBytes) {
+                bcopy(video_recv->p_data, datacopy, bufsize);
+            } else {
+                // The NDI frame has padding at the end of each row.  Copy it into a tightly
+                // packed buffer, because the bitmap context below uses xres * 4 bytes per row.
+                for (int y = 0; y < video_recv->yres; y++) {
+                    bcopy(video_recv->p_data + ((ssize_t)y * inStride),
+                          datacopy + ((ssize_t)y * rowBytes), rowBytes);
+                }
+            }
 
             drawOnScreenLights(datacopy, video_recv->xres, video_recv->yres, 4);
 
