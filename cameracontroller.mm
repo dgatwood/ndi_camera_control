@@ -268,7 +268,8 @@ typedef struct receiver_thread_data {
     const NDIlib_v3 *p_NDILib;
     NDIlib_recv_instance_t pNDI_recv;
     char *stream_name;
-    _Atomic bool running;
+    _Atomic bool running;         // True while the receiver thread is alive.
+    _Atomic bool stop_requested;  // Set by the main thread to ask the receiver thread to exit.
 } *receiver_thread_data_t;
 
 typedef struct receiver_array_item {
@@ -530,6 +531,7 @@ uint32_t find_named_source(const NDIlib_source_t *p_sources,
                            bool use_fallback);
 bool source_name_compare(const char *name1, const char *name2, bool use_fallback);
 bool sourceIsActiveForName(const char *source_name, receiver_array_item_t array);
+static bool retireSupersededReceivers(const char *new_source_name);
 receiver_array_item_t new_receiver_array_item(void);
 void free_receiver_item(receiver_array_item_t receiver_item);
 void *runNDIRunLoop(void *receiver_thread_data_ref);
@@ -927,7 +929,10 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
                 const char *found_source_name = p_sources[source_number].p_ndi_name;
                 bool is_active = sourceIsActiveForName(found_source_name, g_active_receivers);
 
-                if (!is_active) {
+                    // If the camera is already connected under a different NDI name (for example,
+                    // because it rebooted with a new IP address), ask the old receiver to stop and
+                    // wait for it to go away rather than running two receiver threads at once.
+                    if (!is_active && !retireSupersededReceivers(found_source_name)) {
                     // Create the receiver
                     NDIlib_recv_create_v3_t NDI_recv_create_desc = {
                         p_sources[source_number],
@@ -947,6 +952,7 @@ fprintf(stderr, "Opening I/O Expander at %s\n", PIMORONI_I2C_FILENAME);
                         thread_data->pNDI_recv = receiver_item->receiver;
                         safe_asprintf(&thread_data->stream_name, "%s", stream_name);
                         receiver_item->thread_data = thread_data;
+                        atomic_store(&thread_data->stop_requested, false);
                         atomic_store(&thread_data->running, true);
                         if (pthread_create(&receiver_item->receiver_thread, NULL, runNDIRunLoop, thread_data) == 0) {
                             g_active_receivers = receiver_item;
@@ -1091,7 +1097,7 @@ void *runNDIRunLoop(void *receiver_thread_data_ref) {
     char *stream_name = thread_data->stream_name;
 
     bool exit_loop = false;
-    while(!exit_loop && !exit_app) {
+    while(!exit_loop && !exit_app && !atomic_load(&thread_data->stop_requested)) {
         NDIlib_video_frame_v2_t video_recv;
 #ifdef ENABLE_AUDIO
         NDIlib_audio_frame_v3_t audio_recv;
@@ -3931,6 +3937,27 @@ uint32_t find_named_source(const NDIlib_source_t *p_sources,
         }
     }
     return -1;
+}
+
+/**
+ * Asks every active receiver whose NDI name differs from new_source_name but refers to the
+ * same camera (the names match once the IP address is ignored) to stop.  NDIlib_recv_capture_v3
+ * reports a vanished sender as "no frame" rather than an error, so the old receiver thread
+ * would otherwise never exit.  Returns true if any such receiver is still around, in which
+ * case the caller should wait for the main loop to retire it before creating the new one.
+ */
+static bool retireSupersededReceivers(const char *new_source_name) {
+    bool found = false;
+    for (receiver_array_item_t item = g_active_receivers; item != NULL; item = item->next) {
+        if (strcmp(item->name, new_source_name) != 0 &&
+            source_name_compare(item->name, new_source_name, true)) {
+            fprintf(stderr, "Receiver \"%s\" has been replaced by \"%s\".  Stopping it.\n",
+                    item->name, new_source_name);
+            atomic_store(&item->thread_data->stop_requested, true);
+            found = true;
+        }
+    }
+    return found;
 }
 
 bool sourceIsActiveForName(const char *source_name, receiver_array_item_t array) {
