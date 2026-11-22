@@ -509,6 +509,19 @@ motionData_t g_motionData;
 #else
     DNSServiceRef g_dnssd_browseRef = NULL, g_dnssd_resolveRef = NULL, g_dnssd_lookupRef = NULL;
     char *g_dnssd_browseContext = NULL;
+
+    // The DNS-SD reply callbacks run inside DNSServiceProcessResult() for their own reference,
+    // so they must not deallocate that reference (or restart browsing, which deallocates all
+    // of them).  Instead they record what needs to happen here, and the run loop does it after
+    // DNSServiceProcessResult() returns (see runPendingDNSSDActions).  Protected by
+    // g_dnssd_mutex.
+    enum {
+        kDNSSDPendingRestart = 1 << 0,        // Stop everything and start browsing again.
+        kDNSSDPendingReleaseResolve = 1 << 1, // Deallocate the resolve reference.
+        kDNSSDPendingReleaseLookup = 1 << 2,  // Deallocate the address lookup reference.
+    };
+    int g_dnssd_pending_actions = 0;
+    void runPendingDNSSDActions(const char *stream_name);
 #endif
 
 static std::atomic<bool> exit_app(false);
@@ -1214,6 +1227,10 @@ void *runNDIRunLoop(void *receiver_thread_data_ref) {
                         if (lookupfd != -1 && FD_ISSET(lookupfd, &set)) {
                             DNSServiceProcessResult(g_dnssd_lookupRef);
                         }
+
+                        // Now that no callback is running, do whatever teardown or restart
+                        // the callbacks asked for.
+                        runPendingDNSSDActions(stream_name);
                         DB_pthread_mutex_unlock(&g_dnssd_mutex);
                     }
                 }
@@ -1789,18 +1806,19 @@ bool connectVISCA(char *unsafe_stream_name, const char *context) {
         free(stream_name);
         return false;
     }
-    if (g_avahi_browseContext != NULL) {
-        free(g_avahi_browseContext);
-    }
-    g_avahi_browseContext = stream_name;
-
     g_avahi_simple_poll = avahi_simple_poll;
     g_avahi_client = avahi_client;
 
+    // Free the old browser before the context it holds as its userdata.
     if (g_avahi_service_browser != NULL) {
         avahi_service_browser_free(g_avahi_service_browser);
     }
     g_avahi_service_browser = avahi_service_browser;
+
+    if (g_avahi_browseContext != NULL) {
+        free(g_avahi_browseContext);
+    }
+    g_avahi_browseContext = stream_name;
 
     DB_pthread_mutex_unlock(&g_avahiMutex);
     return true;
@@ -2007,6 +2025,28 @@ void stopDNSSDResolving(void) {
         free(g_dnssd_browseContext);
         g_dnssd_browseContext = NULL;
     }
+
+    // Everything that a pending action could release is gone now.
+    g_dnssd_pending_actions = 0;
+}
+
+void runPendingDNSSDActions(const char *stream_name) {
+    // Called with g_dnssd_mutex held, and never from inside a DNS-SD callback.
+    int actions = g_dnssd_pending_actions;
+    g_dnssd_pending_actions = 0;
+
+    if (actions & kDNSSDPendingRestart) {
+        connectVISCA((char *)stream_name, "7");  // Stops all references and browses again.
+        return;
+    }
+    if ((actions & kDNSSDPendingReleaseResolve) && g_dnssd_resolveRef != NULL) {
+        DNSServiceRefDeallocate(g_dnssd_resolveRef);
+        g_dnssd_resolveRef = NULL;
+    }
+    if ((actions & kDNSSDPendingReleaseLookup) && g_dnssd_lookupRef != NULL) {
+        DNSServiceRefDeallocate(g_dnssd_lookupRef);
+        g_dnssd_lookupRef = NULL;
+    }
 }
 
 void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
@@ -2019,7 +2059,9 @@ void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
                                  void *context) {
     if (errorCode) {
         fprintf(stderr, "Service browser for VISCA failed (error %d)\n", errorCode);
-        connectVISCA((char *)context, "3");
+        DB_pthread_mutex_lock(&g_dnssd_mutex);
+        g_dnssd_pending_actions |= kDNSSDPendingRestart;  // Can't restart from inside a callback.
+        DB_pthread_mutex_unlock(&g_dnssd_mutex);
         return;
     }
     char *stream_name = (char *)context;
@@ -2042,7 +2084,7 @@ void handleDNSServiceBrowseReply(DNSServiceRef sdRef,
         if (resolverErrorCode != kDNSServiceErr_NoError) {
             fprintf(stderr, "Could not start service resolver for VISCA (error %d)\n", resolverErrorCode);
             g_dnssd_resolveRef = NULL;
-            connectVISCA((char *)context, "4");
+            g_dnssd_pending_actions |= kDNSSDPendingRestart;  // Can't restart from inside a callback.
             DB_pthread_mutex_unlock(&g_dnssd_mutex);
             return;
         }
@@ -2065,7 +2107,9 @@ void handleDNSServiceResolveReply(DNSServiceRef sdRef,
     fprintf(stderr, "VISCA resolved\n");
     if (errorCode) {
         fprintf(stderr, "Service resolver for VISCA failed (error %d)\n", errorCode);
-        connectVISCA((char *)context, "5");
+        DB_pthread_mutex_lock(&g_dnssd_mutex);
+        g_dnssd_pending_actions |= kDNSSDPendingRestart;  // Can't restart from inside a callback.
+        DB_pthread_mutex_unlock(&g_dnssd_mutex);
         return;
     }
     DB_pthread_mutex_lock(&g_dnssd_mutex);
@@ -2079,7 +2123,7 @@ void handleDNSServiceResolveReply(DNSServiceRef sdRef,
     {
         fprintf(stderr, "Could not start host resolver for VISCA (error %d)\n", lookupErrorCode);
         g_dnssd_lookupRef = NULL;
-        connectVISCA((char *)context, "6");
+        g_dnssd_pending_actions |= kDNSSDPendingRestart;  // Can't restart from inside a callback.
         DB_pthread_mutex_unlock(&g_dnssd_mutex);
         return;
     }
@@ -2104,23 +2148,19 @@ void handleDNSServiceGetAddrInfoReply(DNSServiceRef sdRef,
             if (flags & kDNSServiceFlagsMoreComing) {
                 return;
             }  // Keep browsing until we have a full response.
+            // sdRef is the reference this callback is running in, so it can't be deallocated
+            // here.  Ask the run loop to do it once DNSServiceProcessResult() returns.
             DB_pthread_mutex_lock(&g_dnssd_mutex);
-            DNSServiceRefDeallocate(sdRef);
-            g_dnssd_lookupRef = NULL;
+            g_dnssd_pending_actions |= kDNSSDPendingReleaseLookup;
             DB_pthread_mutex_unlock(&g_dnssd_mutex);
             return;
         }
         fprintf(stderr, "VISCA ready.\n");
 
+        // Both references are done with.  The lookup reference is the one this callback is
+        // running in, so release them from the run loop once DNSServiceProcessResult() returns.
         DB_pthread_mutex_lock(&g_dnssd_mutex);
-        if (g_dnssd_resolveRef) {
-            DNSServiceRefDeallocate(g_dnssd_resolveRef);
-            g_dnssd_resolveRef = NULL;
-        }
-        if (g_dnssd_lookupRef) {
-            DNSServiceRefDeallocate(g_dnssd_lookupRef);
-            g_dnssd_lookupRef = NULL;
-        }
+        g_dnssd_pending_actions |= kDNSSDPendingReleaseResolve | kDNSSDPendingReleaseLookup;
         DB_pthread_mutex_unlock(&g_dnssd_mutex);
         return;
     }
