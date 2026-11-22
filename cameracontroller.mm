@@ -1590,6 +1590,10 @@ void drawOnScreenStats(void) {
   tfb_set_font_by_size(16, 32);
   tfb_draw_string(10, 10, tfb_white, tfb_black, string);
   tfb_draw_string(10, 42, tfb_white, tfb_black, string2);
+
+  // asprintf allocates these on every call, so free them or this leaks twice per frame.
+  free(string);
+  free(string2);
 #endif
 }
 
